@@ -41,8 +41,9 @@ static void rxPush(const uint8_t* p, size_t n) {
 
 class RxCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* c) override {
-    std::string v = c->getValue();
-    if (!v.empty()) rxPush((const uint8_t*)v.data(), v.size());
+    // Arduino-ESP32 3.x returns String here, not std::string as 2.x did.
+    String v = c->getValue();
+    if (v.length()) rxPush((const uint8_t*)v.c_str(), v.length());
   }
 };
 

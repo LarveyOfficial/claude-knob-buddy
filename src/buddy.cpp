@@ -1,6 +1,6 @@
 #include "buddy.h"
 #include "buddy_common.h"
-#include <M5StickCPlus.h>
+#include "hal/tft_compat.h"
 #include <string.h>
 
 extern TFT_eSprite spr;
@@ -9,9 +9,18 @@ extern TFT_eSprite spr;
 enum { B_SLEEP, B_IDLE, B_BUSY, B_ATTENTION, B_CELEBRATE, B_DIZZY, B_HEART };
 
 // ──────────────── shared geometry ────────────────
-const int BUDDY_X_CENTER = 67;
-const int BUDDY_CANVAS_W = 135;
-const int BUDDY_Y_BASE   = 30;
+// Retargeted from the M5StickC Plus's 135x240 portrait panel to this board's
+// 360x360 round one. Species files are written against BUDDY_X_CENTER and
+// BUDDY_Y_OVERLAY and scaled by _scale, so changing these three numbers
+// relocates all 18 of them with no per-species edits.
+//
+// BUDDY_Y_BASE stays a scale-1 coordinate: buddyPrintSprite() computes the
+// real top as (BUDDY_Y_BASE * _scale - (_scale - 1) * 14). At the home scale
+// of 3 that puts 39 -> y=89, so a 6-row species occupies y 89..233 and
+// leaves the lower third of the circle for the HUD.
+const int BUDDY_X_CENTER = 180;
+const int BUDDY_CANVAS_W = 360;
+const int BUDDY_Y_BASE   = 39;
 const int BUDDY_Y_OVERLAY = 6;
 const int BUDDY_CHAR_W   = 6;
 const int BUDDY_CHAR_H   = 8;
@@ -147,7 +156,10 @@ static uint8_t lastDrawnSpecies = 0xFF;
 void buddyInvalidate() { lastDrawnState = 0xFF; }
 
 void buddySetPeek(bool peek) {
-  uint8_t s = peek ? 1 : 2;
+  // Was 1 (peek) / 2 (home) on the 135px-wide stick. On a 360px panel the
+  // widest species row is 17 chars, so home caps at 3: 17 * 6 * 4 = 408px
+  // would overflow the panel, while 17 * 6 * 3 = 306px fits.
+  uint8_t s = peek ? 2 : 3;
   if (s == _scale) return;
   _scale = s;
   buddyInvalidate();

@@ -1,172 +1,157 @@
-# claude-desktop-buddy
+# claude-knob-buddy
 
-Claude for macOS and Windows can connect Claude Cowork and Claude Code to
-maker devices over BLE, so developers and makers can build hardware that
-displays permission prompts, recent messages, and other interactions. We've
-been impressed by the creativity of the maker community around Claude -
-providing a lightweight, opt-in API is our way of making it easier to build
-fun little hardware devices that integrate with Claude.
+A fork of [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)
+for the **Waveshare ESP32-S3-Knob-Touch-LCD-1.8** — a 360×360 round touch
+display with a rotary knob and a metal case.
 
-> **Building your own device?** You don't need any of the code here. See
-> **[REFERENCE.md](REFERENCE.md)** for the wire protocol: Nordic UART
-> Service UUIDs, JSON schemas, and the folder push transport.
+The upstream firmware targets an M5StickC Plus. This board shares almost
+nothing with it, so the port replaces the whole hardware layer while keeping
+the protocol, the eighteen ASCII pets, the GIF character support and the
+screens intact.
 
-As an example, we built a desk pet on ESP32 that lives off permission
-approvals and interaction with Claude. It sleeps when nothing's happening,
-wakes when sessions start, gets visibly impatient when an approval prompt is
-waiting, and lets you approve or deny right from the device.
+> **Building your own device instead?** You don't need this repo either. See
+> upstream **[REFERENCE.md](REFERENCE.md)** for the wire protocol — it is
+> board-independent and is kept here unmodified.
 
-<p align="center">
-  <img src="docs/device.jpg" alt="M5StickC Plus running the buddy firmware" width="500">
-</p>
+## What changed from upstream
+
+| | M5StickC Plus (upstream) | Knob 1.8 (this fork) |
+| --- | --- | --- |
+| Panel | 135×240 SPI ST7789 | **360×360 round QSPI ST77916** |
+| Graphics | TFT_eSPI | **Arduino_GFX** — TFT_eSPI cannot drive QSPI |
+| Input | BtnA, BtnB, power button | **rotary knob + CST816 touch** |
+| Motion | MPU6886 IMU | none |
+| Power | AXP192 PMIC | LEDC backlight PWM |
+| Feedback | piezo buzzer, red LED | **DRV2605 LRA haptics** |
+| Clock | BM8563 RTC | software clock, set over BLE |
+
+Rather than rewrite the UI, `src/hal/tft_compat.h` provides the ~24 TFT_eSPI
+calls the firmware actually makes on top of `Arduino_Canvas`. Nineteen of them
+already exist on Arduino_GFX with identical signatures; only sprite lifecycle
+and text anchoring needed code. All eighteen `src/buddies/*.cpp` files are
+unchanged apart from one `#include`.
+
+Two features are gone because their hardware is:
+
+- **Shake → dizzy** now triggers on spinning the knob hard.
+- **Face-down → nap** is removed entirely; energy recovers while idle.
+  The `led` and `clock rot` settings went with the LED and the IMU.
 
 ## Hardware
 
-The firmware targets ESP32 with the Arduino framework. As written, it
-depends on the M5StickCPlus library for its display, IMU, and button
-drivers—so you'll need that board, or a fork that swaps those drivers for
-your own pin layout.
+Pins below are confirmed against Waveshare's own demo code.
+
+| Peripheral | Pins |
+| --- | --- |
+| ST77916 QSPI | CLK 13, D0 15, D1 16, D2 17, D3 18, CS 14, RST 21 |
+| Backlight | GPIO 47 (LEDC, 50 kHz, 8-bit) |
+| CST816 touch | SDA 11, SCL 12, INT 9, RST 10 — I²C `0x15` |
+| DRV2605 haptics | same I²C bus — `0x5A` |
+| Rotary knob | A = GPIO 8, B = GPIO 7 (rotation only, no push switch) |
+
+Unused by this firmware: the PCM5100A DAC, TF card slot, PDM microphone, the
+battery ADC on GPIO 1, and the board's **second MCU** (an ESP32-U4WDH that
+handles Bluetooth audio). Because there is no battery reading, the BLE status
+ack reports mains power with no battery percentage.
 
 ## Flashing
 
-Install
-[PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/),
+Install [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/),
 then:
 
 ```bash
-pio run -t upload
+pio run -e knob -t upload --upload-port /dev/cu.usbmodemXXXX
 ```
 
-If you're starting from a previously-flashed device, wipe it first:
+**Plug orientation matters.** A CH445P analog switch picks which MCU is on USB
+based on which way up the Type-C connector is. You want the ESP32-S3, which
+enumerates as `303A:1001` on `/dev/cu.usbmodem*`. If you instead see
+`1A86:7523` on `/dev/cu.usbserial*`, that is the secondary ESP32 — flip the
+cable over. The port number changes on every replug, so pass `--upload-port`
+explicitly. A `PermissionError` right after a successful flash is normal; USB
+re-enumerates during the reset.
+
+Two bring-up sketches are included for diagnosing a new board:
 
 ```bash
-pio run -t erase && pio run -t upload
+pio run -e paneltest -t upload --upload-port ...   # panel, colours, geometry
+pio run -e inputtest -t upload --upload-port ...   # I2C scan, touch, knob, haptics
 ```
 
-Once running, you can also wipe everything from the device itself: **hold A
-→ settings → reset → factory reset → tap twice**.
+### Build notes worth knowing
+
+- **`pioarduino` 51.03.07 is required.** Stock `platform = espressif32` ships
+  ESP-IDF 4.4, which lacks the QSPI panel APIs; Arduino core 3.1+ refactored
+  the BLE library away from the Bluedroid types `src/ble_bridge.cpp` uses.
+  51.03.07 (Arduino 3.0.7 / IDF 5.1) is the combination that satisfies both.
+- **Arduino_GFX is pinned to 1.5.0.** Later versions call ESP-IDF 5.3 symbols
+  (`ESP_INTR_CPU_AFFINITY_AUTO`, `dma_burst_size`) that don't exist in 5.1.
+- **QSPI runs at 20 MHz, not the library default 40 MHz.** At 40 MHz black
+  backgrounds showed a fine line pattern while solid white stayed clean — the
+  signature of marginal timing, since a flipped bit lights a pixel against
+  black but vanishes against white. 20 MHz costs about 26 ms per full-frame
+  flush (~38 fps ceiling) and is completely clean.
+- **The ST77916 init table is Waveshare's, not Arduino_GFX's**
+  (`src/hal/st77916_waveshare.h`). The built-in table renders diagonal noise
+  on this panel: register `0xC4` differs, and Arduino_GFX never sends
+  `COLMOD`, which Waveshare's driver injects separately. Colour inversion is
+  *not* involved — flipping `0x21` to `0x20` inverts the whole display.
 
 ## Pairing
 
-To pair your device with Claude, first enable developer mode (**Help →
-Troubleshooting → Enable Developer Mode**). Then, open the Hardware Buddy
-window in **Developer → Open Hardware Buddy…**, click **Connect**, and pick
-your device from the list. macOS will prompt for Bluetooth permission on
-first connect; grant it.
-
-<p align="center">
-  <img src="docs/menu.png" alt="Developer → Open Hardware Buddy… menu item" width="420">
-  <img src="docs/hardware-buddy-window.png" alt="Hardware Buddy window with Connect button and folder drop target" width="420">
-</p>
-
-Once paired, the bridge auto-reconnects whenever both sides are awake.
-
-If discovery isn't finding the stick:
-
-- Make sure it's awake (any button press)
-- Check the stick's settings menu → bluetooth is on
+Enable developer mode in Claude for macOS or Windows (**Help →
+Troubleshooting → Enable Developer Mode**), then **Developer → Open Hardware
+Buddy…**, click **Connect**, and pick `Claude-XXXX`. The device shows a
+six-digit passkey to type on the desktop; after that the link is encrypted and
+reconnects on its own.
 
 ## Controls
 
-|                         | Normal               | Pet         | Info        | Approval    |
-| ----------------------- | -------------------- | ----------- | ----------- | ----------- |
-| **A** (front)           | next screen          | next screen | next screen | **approve** |
-| **B** (right)           | scroll transcript    | next page   | next page   | **deny**    |
-| **Hold A**              | menu                 | menu        | menu        | menu        |
-| **Power** (left, short) | toggle screen off    |             |             |             |
-| **Power** (left, ~6s)   | hard power off       |             |             |             |
-| **Shake**               | dizzy                |             |             | —           |
-| **Face-down**           | nap (energy refills) |             |             |             |
+|  | Turn knob | Tap screen | Hold screen |
+| --- | --- | --- | --- |
+| **Home** | scroll transcript | next screen | menu |
+| **Menu / settings** | move selection | activate | close |
+| **Info / pet** | change page | next screen | menu |
+| **Approval** | **deny** | **tap DENY or APPROVE** | menu |
 
-The screen auto-powers-off after 30s of no interaction (kept on while an
-approval prompt is up). Any button press wakes it.
+Spin the knob hard to make the pet dizzy. The screen sleeps after 30s idle
+(kept awake while an approval is pending); any touch wakes it.
 
-## ASCII pets
+Note the knob scrolls and the tap activates — the opposite of upstream, where
+BtnA stepped the selection and BtnB confirmed it.
 
-Eighteen pets, each with seven animations (sleep, idle, busy, attention,
-celebrate, dizzy, heart). Menu → "next pet" cycles them with a counter.
-Choice persists to NVS.
+## Pets and characters
 
-## GIF pets
+Unchanged from upstream: eighteen ASCII species with seven animations each,
+cycled via **Settings → ascii pet**, and GIF character packs dropped onto the
+Hardware Buddy window's target. Art is drawn at 3× here rather than 2× — the
+widest species row is 17 characters, and 17 × 6 × 4 would overflow 360px.
 
-If you want a custom GIF character instead of an ASCII buddy, drag a
-character pack folder onto the drop target in the Hardware Buddy window. The
-app streams it over BLE and the stick switches to GIF mode live. **Settings
-→ delete char** reverts to ASCII mode.
-
-A character pack is a folder with `manifest.json` and 96px-wide GIFs:
-
-```json
-{
-  "name": "bufo",
-  "colors": {
-    "body": "#6B8E23",
-    "bg": "#000000",
-    "text": "#FFFFFF",
-    "textDim": "#808080",
-    "ink": "#000000"
-  },
-  "states": {
-    "sleep": "sleep.gif",
-    "idle": ["idle_0.gif", "idle_1.gif", "idle_2.gif"],
-    "busy": "busy.gif",
-    "attention": "attention.gif",
-    "celebrate": "celebrate.gif",
-    "dizzy": "dizzy.gif",
-    "heart": "heart.gif"
-  }
-}
-```
-
-State values can be a single filename or an array. Arrays rotate: each
-loop-end advances to the next GIF, useful for an idle activity carousel so
-the home screen doesn't loop one clip forever.
-
-GIFs are 96px wide; height up to ~140px stays on a 135×240 portrait screen.
-Crop tight to the character — transparent margins waste screen and shrink
-the sprite. `tools/prep_character.py` handles the resize: feed it source
-GIFs at any sizes and it produces a 96px-wide set where the character is the
-same scale in every state.
-
-The whole folder must fit under 1.8MB —
-`gifsicle --lossy=80 -O3 --colors 64` typically cuts 40–60%.
-
-See `characters/bufo/` for a working example.
-
-If you're iterating on a character and would rather skip the BLE round-trip,
-`tools/flash_character.py characters/bufo` stages it into `data/` and runs
-`pio run -t uploadfs` directly over USB.
-
-## The seven states
-
-| State       | Trigger                     | Feel                        |
-| ----------- | --------------------------- | --------------------------- |
-| `sleep`     | bridge not connected        | eyes closed, slow breathing |
-| `idle`      | connected, nothing urgent   | blinking, looking around    |
-| `busy`      | sessions actively running   | sweating, working           |
-| `attention` | approval pending            | alert, **LED blinks**       |
-| `celebrate` | level up (every 50K tokens) | confetti, bouncing          |
-| `dizzy`     | you shook the stick         | spiral eyes, wobbling       |
-| `heart`     | approved in under 5s        | floating hearts             |
+See upstream's README for the character-pack format; `characters/bufo/` is a
+working example and `tools/` is carried over as-is.
 
 ## Project layout
 
 ```
 src/
-  main.cpp       — loop, state machine, UI screens
-  buddy.cpp      — ASCII species dispatch + render helpers
-  buddies/       — one file per species, seven anim functions each
-  ble_bridge.cpp — Nordic UART service, line-buffered TX/RX
-  character.cpp  — GIF decode + render
-  data.h         — wire protocol, JSON parse
-  xfer.h         — folder push receiver
-  stats.h        — NVS-backed stats, settings, owner, species choice
-characters/      — example GIF character packs
-tools/           — generators and converters
+  hal/                  — everything board-specific lives here
+    panel.*             — ST77916 QSPI + PSRAM framebuffer + backlight
+    st77916_waveshare.h — Waveshare's 185-command init sequence
+    tft_compat.h        — the TFT_eSPI surface, over Arduino_GFX
+    input.*             — knob + touch, presented as two buttons
+    haptics.*           — DRV2605 (replaces the buzzer and the LED)
+    power.*             — brightness, screen off, deep sleep
+    softclock.*         — wall clock (replaces the RTC)
+  tests/                — panel and input bring-up sketches
+  main.cpp              — loop, state machine, UI screens
+  buddy.cpp, buddies/   — ASCII species (unchanged but for one include)
+  ble_bridge.cpp        — Nordic UART service
+  character.cpp         — GIF decode + render
+  data.h, xfer.h, stats.h
 ```
 
 ## Availability
 
-The BLE API is only available when the desktop apps are in developer mode
-(**Help → Troubleshooting → Enable Developer Mode**). It's intended for
-makers and developers and isn't an officially supported product feature.
+The BLE API is only available when the Claude desktop apps are in developer
+mode. It is intended for makers and isn't an officially supported product
+feature.

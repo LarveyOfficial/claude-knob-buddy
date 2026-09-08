@@ -1,5 +1,5 @@
 #include "character.h"
-#include <M5StickCPlus.h>
+#include "hal/tft_compat.h"
 #include <LittleFS.h>
 #include <AnimatedGIF.h>
 #include <ArduinoJson.h>
@@ -141,8 +141,17 @@ bool characterInit(const char* name) {
   if (!LittleFS.begin(false)) {
     // begin() fails if already mounted — that's fine on reload
     if (!LittleFS.open("/")) {
-      Serial.println("[char] LittleFS mount failed");
-      return false;
+      // A never-written partition has no filesystem to mount. The original
+      // firmware always had one laid down by `pio run -t uploadfs`; here the
+      // partition is fresh from the factory, so format it once. Only reached
+      // when the mount genuinely failed, so this cannot eat a good
+      // filesystem — a mountable one takes the branch above.
+      Serial.println("[char] LittleFS mount failed, formatting once...");
+      if (!LittleFS.begin(true)) {
+        Serial.println("[char] LittleFS format failed");
+        return false;
+      }
+      Serial.println("[char] LittleFS formatted");
     }
   }
 

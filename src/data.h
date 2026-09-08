@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include "ble_bridge.h"
 #include "xfer.h"
+#include "hal/softclock.h"
 
 struct TamaState {
   uint8_t  sessionsTotal;
@@ -76,15 +77,13 @@ static void _applyJson(const char* line, TamaState* out) {
   // adjusted epoch yields local components including weekday.
   JsonArray t = doc["time"];
   if (!t.isNull() && t.size() == 2) {
-    time_t local = (time_t)t[0].as<uint32_t>() + (int32_t)t[1];
-    struct tm lt; gmtime_r(&local, &lt);
-    RTC_TimeTypeDef tm = { (uint8_t)lt.tm_hour, (uint8_t)lt.tm_min, (uint8_t)lt.tm_sec };
-    RTC_DateTypeDef dt = { (uint8_t)lt.tm_wday, (uint8_t)(lt.tm_mon + 1),
-                           (uint8_t)lt.tm_mday, (uint16_t)(lt.tm_year + 1900) };
-    M5.Rtc.SetTime(&tm);
-    M5.Rtc.SetDate(&dt);
+    // No RTC on this board: hand epoch and offset to the software clock,
+    // which sets the system time and TZ. It handles the local-time
+    // conversion, so unlike the original there is no need to pre-add the
+    // offset and call gmtime_r.
+    softclockSet(t[0].as<uint32_t>(), (int32_t)t[1]);
     extern uint32_t _clkLastRead;
-    _clkLastRead = 0;   // force re-read so _clkDt and _rtcValid agree
+    _clkLastRead = 0;   // force re-read so the cached tm and _rtcValid agree
     _rtcValid = true;
     _lastLiveMs = millis();
     return;

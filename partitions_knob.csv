@@ -1,0 +1,9 @@
+# Waveshare ESP32-S3-Knob-Touch-LCD-1.8 — 16MB flash, no OTA.
+# 4MB app leaves ~11.8MB LittleFS for GIF character packs (packs cap at 1.8MB).
+# The coredump region is worth its 64KB during bring-up: without it a panic
+# only prints a backtrace, with it the dump survives the reboot.
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+app0,       app,  factory,  0x10000,  0x400000,
+spiffs,     data, spiffs,   0x410000, 0xBE0000,
+coredump,   data, coredump, 0xFF0000, 0x10000,
