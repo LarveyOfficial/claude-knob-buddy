@@ -996,13 +996,34 @@ static void drawHomeStats(const Palette& p) {
   }
   if (tama.lineGen != lastLineGen) { lastLineGen = tama.lineGen; wake(); }
 
-  int y = TOP + 6;
+  // Four rows now: session count, then mood / fed / energy. The count has
+  // to live here - at 360px the area above and beside the pet is all
+  // outside the circle, so this strip is the only space available.
+  int y = TOP + 4;
+  spr.setTextDatum(MC_DATUM);
+  spr.setTextSize(2);
+  char sb[32];
+  if (tama.sessionsWaiting > 0)
+    snprintf(sb, sizeof(sb), "%u run  %u wait",
+             (unsigned)tama.sessionsRunning, (unsigned)tama.sessionsWaiting);
+  else if (tama.sessionsRunning > 0)
+    snprintf(sb, sizeof(sb), "%u running", (unsigned)tama.sessionsRunning);
+  else
+    snprintf(sb, sizeof(sb), "%u sessions", (unsigned)tama.sessionsTotal);
+  spr.setTextColor(tama.sessionsWaiting  ? HOT
+                 : tama.sessionsRunning  ? p.body
+                                         : p.textDim, p.bg);
+  spr.drawString(sb, CX, y);
+  spr.setTextDatum(TL_DATUM);
+  spr.setTextSize(1);
+
+  y += 30;
   uint8_t mood = statsMoodTier();
   uint16_t moodCol = (mood >= 3) ? RED : (mood >= 2) ? HOT : p.textDim;
   int x = CX - (4 * 26) / 2 + 13;
   for (int i = 0; i < 4; i++) tinyHeart(x + i * 26, y, i < mood, moodCol);
 
-  y += 30;
+  y += 26;
   uint8_t fed = statsFedProgress();
   x = CX - (10 * 15) / 2 + 7;
   for (int i = 0; i < 10; i++) {
@@ -1010,7 +1031,7 @@ static void drawHomeStats(const Palette& p) {
     else         spr.drawCircle(x + i * 15, y, 4, p.textDim);
   }
 
-  y += 28;
+  y += 24;
   uint8_t en = statsEnergyTier();
   uint16_t enCol = (en >= 4) ? 0x07FF : (en >= 2) ? 0xFFE0 : HOT;
   x = CX - (5 * 22) / 2 + 3;

@@ -141,9 +141,13 @@ Screens differ from upstream, which put the transcript on the home screen
 under the pet. On a round face that band is only ~200px wide, so entries
 fragmented across rows and were too small to read. Instead:
 
-- **Home** — the character, with mood / fed / energy as hearts, dots and
-  bars underneath. No labels: the shapes carry the meaning, and the width
-  saved lets the indicators be big enough to read at a glance.
+- **Home** — the character, with a session line and then mood / fed /
+  energy as hearts, dots and bars underneath. The indicators carry no
+  labels: the shapes are the legend, and the width saved lets them be big
+  enough to read at a glance. The session line changes wording and colour
+  with state — `2 run  1 wait` in red-orange when something is blocked on
+  you, `2 running` in the body colour while Claude works, `3 sessions`
+  dimmed when idle.
 - **Pet page** — level, approve/deny counts, token totals, then the
   transcript at size 1 across eight rows, which shows roughly 300
   characters. (`wrapInto` wrote into a 24-byte row buffer sized for the
