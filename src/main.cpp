@@ -60,6 +60,19 @@ const uint16_t HOT   = 0xFA20;   // red-orange: warnings, impatience, deny
 const uint16_t PANEL = 0x2104;   // overlay panel background
 
 enum PersonaState { P_SLEEP, P_IDLE, P_BUSY, P_ATTENTION, P_CELEBRATE, P_DIZZY, P_HEART };
+
+// REFERENCE.md describes `prompt` as "a permission decision is needed", but
+// the desktop also raises it for tools that ask the user an open question.
+// Those have no yes/no answer, so echoing back "once" or "deny" is
+// meaningless - the reply has to happen on the desktop. Show attention and
+// say so, rather than offering two buttons that cannot express an answer.
+static const char* const QUESTION_TOOLS[] = { "AskUserQuestion" };
+
+static bool promptIsQuestion(const char* tool) {
+  if (!tool || !tool[0]) return false;
+  for (auto* q : QUESTION_TOOLS) if (strcmp(tool, q) == 0) return true;
+  return false;
+}
 const char* stateNames[] = { "sleep", "idle", "busy", "attention", "celebrate", "dizzy", "heart" };
 
 TamaState    tama;
@@ -424,18 +437,21 @@ static void drawClock() {
   const Palette& p = characterPalette();
   char hm[6]; snprintf(hm, sizeof(hm), "%02u:%02u",
                        (unsigned)_clk.tm_hour, (unsigned)_clk.tm_min);
-  char ss[4]; snprintf(ss, sizeof(ss), ":%02u", (unsigned)_clk.tm_sec);
   uint8_t mi = (_clk.tm_mon >= 0 && _clk.tm_mon <= 11) ? _clk.tm_mon : 0;
-  char dl[16]; snprintf(dl, sizeof(dl), "%s %s %02u",
-                        DOW[clockDow()], MON[mi], (unsigned)_clk.tm_mday);
+  char dl[20]; snprintf(dl, sizeof(dl), "%s %s %02u  :%02u",
+                        DOW[clockDow()], MON[mi],
+                        (unsigned)_clk.tm_mday, (unsigned)_clk.tm_sec);
 
-  // One fixed face on the lower half of the circle; the pet keeps the upper
-  // half via peek mode. Clearing from y=200 leaves the pet untouched.
-  spr.fillRect(0, 200, W, H - 200, p.bg);
+  // Same strip as the home indicators (pet occupies y 10..214 above).
+  const int TOP = 222;
+  spr.fillRect(0, TOP - 6, W, H - TOP + 6, p.bg);
   spr.setTextDatum(MC_DATUM);
-  spr.setTextSize(6); spr.setTextColor(p.text, p.bg);    spr.drawString(hm, CX, 248);
-  spr.setTextSize(2); spr.setTextColor(p.textDim, p.bg); spr.drawString(ss, CX, 292);
-  spr.setTextSize(2);                                    spr.drawString(dl, CX, 320);
+  spr.setTextSize(5);
+  spr.setTextColor(p.text, p.bg);
+  spr.drawString(hm, CX, TOP + 34);
+  spr.setTextSize(2);
+  spr.setTextColor(p.textDim, p.bg);
+  spr.drawString(dl, CX, TOP + 76);
   spr.setTextDatum(TL_DATUM);
   spr.setTextSize(1);
 }
@@ -662,7 +678,7 @@ void drawInfo() {
 
 // Greedy word-wrap into fixed-width rows. Continuation rows get a leading
 // space. Returns number of rows written.
-static uint8_t wrapInto(const char* in, char out[][24], uint8_t maxRows, uint8_t width) {
+static uint8_t wrapInto(const char* in, char out[][48], uint8_t maxRows, uint8_t width) {
   uint8_t row = 0, col = 0;
   const char* p = in;
   while (*p && row < maxRows) {
@@ -692,6 +708,28 @@ static uint8_t wrapInto(const char* in, char out[][24], uint8_t maxRows, uint8_t
   }
   if (col > 0 && row < maxRows) { out[row][col] = 0; row++; }
   return row;
+}
+
+// Shown instead of the approval screen when the pending prompt is a
+// question rather than a permission decision. The pet stays in its
+// attention animation above; this only fills the strip below it, so the
+// character is what actually catches your eye.
+static void drawQuestion(const Palette& p) {
+  const int TOP = 222;
+  spr.fillRect(0, TOP - 6, W, H - TOP + 6, p.bg);
+  // Deliberately the same two type sizes and positions as the clock face,
+  // so the strip reads consistently whatever is in it. The prompt hint used
+  // to render here at size 1 and was too small to be worth the space - the
+  // desktop shows the full question anyway.
+  spr.setTextDatum(MC_DATUM);
+  spr.setTextSize(5);
+  spr.setTextColor(p.body, p.bg);
+  spr.drawString("question", CX, TOP + 34);
+  spr.setTextSize(2);
+  spr.setTextColor(p.textDim, p.bg);
+  spr.drawString("answer on desktop", CX, TOP + 76);
+  spr.setTextDatum(TL_DATUM);
+  spr.setTextSize(1);
 }
 
 static void drawApproval() {
@@ -813,10 +851,12 @@ static void drawPetStats(const Palette& p) {
   tokFmt("tokens ", stats().tokens, y);
   tokFmt("today  ", tama.tokensToday, y + 20);
 
-  // Transcript fills the rest of the circle at size 3.
-  spr.drawFastHLine(rowLeft(y + 46) + 10, y + 46,
-                    rowHalf(y + 46) * 2 - 20, p.textDim);
-  drawTranscript(p, y + 58, 3, 3);
+  // Transcript fills the rest of the circle. Size 1 with eight rows shows
+  // roughly 300 characters; size 3 with three rows showed about 45, which
+  // for real transcript lines is two fragments and no context.
+  spr.drawFastHLine(rowLeft(y + 40) + 10, y + 40,
+                    rowHalf(y + 40) * 2 - 20, p.textDim);
+  drawTranscript(p, y + 52, 8, 1);
   spr.setTextSize(1);
 }
 
@@ -881,7 +921,9 @@ void drawPet() {
 // `size` is the text scale; rows wrap to whatever fits the chord at the
 // narrowest row of the block, so nothing runs under the bezel.
 static void drawTranscript(const Palette& p, int top, int rows, uint8_t size) {
-  const int lh  = size * 8 + 8;
+  // 2px leading, not 8: at size 1 the old formula made rows 16px tall and
+  // half the band was blank space.
+  const int lh  = size * 8 + 2;
   const int pad = 10;
   const int gw  = size * 6;
   const int area = rows * lh + 6;
@@ -903,12 +945,12 @@ static void drawTranscript(const Palette& p, int top, int rows, uint8_t size) {
 
   // Wrap all transcript lines into a flat display buffer. Track which
   // transcript index each display row came from, so we can dim older ones.
-  static char disp[32][24];
+  static char disp[32][48];
   static uint8_t srcOf[32];
   uint8_t nDisp = 0;
   for (uint8_t i = 0; i < tama.nLines && nDisp < 32; i++) {
     uint8_t got = wrapInto(tama.lines[i], &disp[nDisp], 32 - nDisp,
-                           (uint8_t)(width > 23 ? 23 : width));
+                           (uint8_t)(width > 47 ? 47 : width));
     for (uint8_t j = 0; j < got; j++) srcOf[nDisp + j] = i;
     nDisp += got;
   }
@@ -947,7 +989,11 @@ static void drawHomeStats(const Palette& p) {
   const int TOP = 222;
   spr.fillRect(0, TOP - 6, W, H - TOP + 6, p.bg);
 
-  if (tama.promptId[0]) { drawApproval(); return; }
+  if (tama.promptId[0]) {
+    if (promptIsQuestion(tama.promptTool)) { drawQuestion(p); return; }
+    drawApproval();
+    return;
+  }
   if (tama.lineGen != lastLineGen) { lastLineGen = tama.lineGen; wake(); }
 
   int y = TOP + 6;
@@ -1043,6 +1089,10 @@ void loop() {
   dataPoll(&tama);
   if (statsPollLevelUp()) triggerOneShot(P_CELEBRATE, 3000);
   baseState = derive(tama);
+  // derive() reaches attention via sessionsWaiting, which covers permission
+  // prompts. A question may not set that counter, so key off the prompt
+  // itself: anything pending should make the pet look up.
+  if (tama.promptId[0] && !responseSent) baseState = P_ATTENTION;
 
   // After waking the screen, hold sleep for 12s so users see the wake-up
   // animation. Urgent states (attention, celebrate, busy) override this.
@@ -1075,6 +1125,9 @@ void loop() {
     lastPromptId[sizeof(lastPromptId)-1] = 0;
     responseSent = false;
     if (tama.promptId[0]) {
+      Serial.printf("[prompt] tool='%s' question=%d hint='%s'\n",
+                    tama.promptTool, promptIsQuestion(tama.promptTool) ? 1 : 0,
+                    tama.promptHint);
       promptArrivedMs = millis();
       wake();
       beep(1200, 80);   // alert chirp
@@ -1089,6 +1142,10 @@ void loop() {
   }
 
   bool inPrompt = tama.promptId[0] && !responseSent;
+  // A question keeps the screen awake and the pet alert, but must not put
+  // the approve/deny UI up or let a tap send a decision.
+  bool isQuestion = promptIsQuestion(tama.promptTool);
+  bool inDecision = inPrompt && !isQuestion;
 
   // Button-press wake. Track which button woke the screen so its full
   // press cycle (including long-press) is swallowed — you don't want
@@ -1120,7 +1177,7 @@ void loop() {
   }
   if (BtnA.wasReleased()) {
     if (!btnALong && !swallowBtnA) {
-      if (inPrompt) {
+      if (inDecision) {
         // The stick had two physical buttons, so approve/deny was A/B. Here
         // the decision comes from *where* on the screen the tap landed:
         // the DENY and APPROVE targets drawn by drawApproval(). A tap
@@ -1177,7 +1234,7 @@ void loop() {
     };
     if (swallowBtnB) { swallowBtnB = false; }
     else
-    if (inPrompt) {
+    if (inDecision) {
       // Deny stays on the knob: it is the one decision worth being able to
       // make without aiming at a touch target.
       char cmd[96];
@@ -1241,8 +1298,12 @@ void loop() {
   // landscapeClock branch is gone entirely.
   static bool wasClocking = false;
   if (clocking != wasClocking) {
-    if (clocking) characterSetPeek(true);
-    else applyDisplayMode();
+    // Upstream put the pet into peek mode here, which halves it - on a
+    // 135px panel 48px wide was a third of the screen, but on 360px it is a
+    // postage stamp. The clock lives in the same strip the home indicators
+    // use, below the pet, so the character keeps its full 2x placement and
+    // the transition no longer reloads the GIF at a different scale.
+    applyDisplayMode();
     characterInvalidate();
     if (buddyMode) buddyInvalidate();
     wasClocking = clocking;

@@ -145,7 +145,15 @@ fragmented across rows and were too small to read. Instead:
   bars underneath. No labels: the shapes carry the meaning, and the width
   saved lets the indicators be big enough to read at a glance.
 - **Pet page** — level, approve/deny counts, token totals, then the
-  transcript at size 3 in the wide middle band.
+  transcript at size 1 across eight rows, which shows roughly 300
+  characters. (`wrapInto` wrote into a 24-byte row buffer sized for the
+  stick, so rows truncated at 23 characters regardless of panel width;
+  widening it is what makes the extra room usable.)
+
+The clock face, when it appears, occupies that same strip below the pet
+rather than taking the lower half of the screen. Upstream shrank the
+character into "peek" mode for the clock, which halves it — fine at 135px
+wide, a postage stamp at 360px.
 
 Spin the knob hard to make the pet dizzy.
 
@@ -154,6 +162,17 @@ it on USB charging; there is no power sensing here, so it is gated on
 sustained idle instead — driving it directly off "always on mains" made the
 clock and the transcript swap places on every message, which reads as the
 screen flashing.
+
+### Questions vs permission prompts
+
+`REFERENCE.md` describes the `prompt` field as "a permission decision is
+needed", but the desktop also raises it for tools that ask an open question
+(observed: `prompt.tool` is `AskUserQuestion`, with `hint` empty). Those have
+no yes/no answer, so echoing `once` or `deny` back would answer something
+that was never asked. This fork checks `prompt.tool` and, for a question,
+shows the character in its `attention` animation with a "question / answer
+on desktop" banner instead of the approve/deny screen, and ignores taps and
+knob turns so no decision can be sent.
 
 `busy` triggers on one running session rather than upstream's three, since
 one session is the common case and the animation otherwise never played.
