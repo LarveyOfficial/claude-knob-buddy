@@ -439,9 +439,16 @@ void characterTick() {
     // possibly starving the BT controller. The sprite already holds the
     // last frame; just stop ticking. Multi-gif states (idle rotation)
     // still advance after a brief pause.
+    // Single-gif states used to freeze here on the last frame, which meant
+    // busy / attention / celebrate / dizzy / heart / sleep each played once
+    // and stopped. The concern upstream was the LittleFS open + GIF header
+    // decode being a multi-ms blocking burst, but looping does not need a
+    // reopen - gif.reset() just rewinds the decoder through the seek
+    // callback. The multi-variant path below already relies on that every
+    // loop, so it is known cheap.
     if (stateCount[curState] == 1) {
-      gif.close();
-      gifOpen = false;
+      gif.reset();
+      nextFrameAt = now;
       return;
     }
     // Multi-variant: loop the same GIF until the dwell window elapses, then

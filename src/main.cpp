@@ -177,8 +177,14 @@ const uint8_t SETTINGS_N = 8;
 
 bool    resetOpen = false;
 uint8_t resetSel  = 0;
-const char* resetItems[] = { "delete char", "factory reset", "back" };
-const uint8_t RESET_N = 3;
+// "clear pairing" is not in upstream. It is needed because the desktop's
+// Forget button sends {"cmd":"unpair"}, which travels over an encrypted
+// characteristic - so once a bond desyncs and auth starts failing, there is
+// no way to reach it from the desktop side. Factory reset would clear the
+// bond but also formats the filesystem, taking the installed character with
+// it. This clears only the stored LTKs.
+const char* resetItems[] = { "delete char", "clear pairing", "factory reset", "back" };
+const uint8_t RESET_N = 4;
 static uint32_t resetConfirmUntil = 0;
 static uint8_t  resetConfirmIdx = 0xFF;
 
@@ -212,7 +218,7 @@ static void applyReset(uint8_t idx) {
   uint32_t now = millis();
   bool armed = (resetConfirmIdx == idx) && (int32_t)(now - resetConfirmUntil) < 0;
 
-  if (idx == 2) { resetOpen = false; return; }
+  if (idx == 3) { resetOpen = false; return; }
 
   if (!armed) {
     resetConfirmIdx = idx;
@@ -247,6 +253,11 @@ static void applyReset(uint8_t idx) {
       }
       d.close();
     }
+  } else if (idx == 1) {
+    // clear pairing: drop stored LTKs only. Settings, stats and the
+    // installed character all survive; the next connect re-pairs with a
+    // fresh passkey.
+    bleClearBonds();
   } else {
     // factory reset: NVS namespace wipe + filesystem format + BLE bonds.
     // Clears stats, owner, petname, species, settings, GIF characters,
@@ -755,6 +766,8 @@ static void drawApproval() {
 }
 
 // Roughly doubled from the original, which was drawn for a 135px panel.
+static void drawTranscript(const Palette& p, int top, int rows, uint8_t size);
+
 static void tinyHeart(int x, int y, bool filled, uint16_t col) {
   if (filled) {
     spr.fillCircle(x - 4, y, 4, col);
@@ -769,62 +782,41 @@ static void tinyHeart(int x, int y, bool filled, uint16_t col) {
 }
 
 static void drawPetStats(const Palette& p) {
-  // Rebuilt for the round face. The original packed labels at x=6 and
-  // indicators from x=38 for a 135px-wide panel; here x=6 is outside the
-  // circle entirely, so everything sits in a label column and a value
-  // column, both inset from the arc.
-  const int TOP = 86;
-  const int LX = 70;      // label column
-  const int VX = 190;     // value column
-  spr.fillRect(0, TOP, W, H - TOP, p.bg);
+  // Mood / fed / energy moved to the home screen strip; this page carries
+  // the numbers plus the transcript, which finally has room to be rendered
+  // at size 3 - the home screen never did, and size 2 on a 32mm face is
+  // about 1.4mm tall, which is why it was hard to read.
+  const int TOP = 110;
+  spr.fillRect(0, TOP - 20, W, H - TOP + 20, p.bg);
   spr.setTextSize(2);
-  int y = TOP + 20;
 
-  spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(LX, y - 6); spr.print("mood");
-  uint8_t mood = statsMoodTier();
-  uint16_t moodCol = (mood >= 3) ? RED : (mood >= 2) ? HOT : p.textDim;
-  for (int i = 0; i < 4; i++) tinyHeart(VX + i * 26, y, i < mood, moodCol);
-
-  y += 30;
-  spr.setCursor(LX, y - 6); spr.print("fed");
-  uint8_t fed = statsFedProgress();
-  for (int i = 0; i < 10; i++) {
-    int px = VX + i * 15;
-    if (i < fed) spr.fillCircle(px, y, 4, p.body);
-    else         spr.drawCircle(px, y, 4, p.textDim);
-  }
-
-  y += 30;
-  spr.setCursor(LX, y - 6); spr.print("energy");
-  uint8_t en = statsEnergyTier();
-  uint16_t enCol = (en >= 4) ? 0x07FF : (en >= 2) ? 0xFFE0 : HOT;
-  for (int i = 0; i < 5; i++) {
-    int px = VX + i * 22;
-    if (i < en) spr.fillRect(px, y - 6, 16, 12, enCol);
-    else        spr.drawRect(px, y - 6, 16, 12, p.textDim);
-  }
-
-  y += 34;
-  spr.fillRoundRect(LX, y - 6, 86, 26, 5, p.body);
+  int y = TOP;
+  spr.fillRoundRect(rowLeft(y + 10) + 10, y - 6, 92, 28, 6, p.body);
   spr.setTextColor(p.bg, p.body);
-  spr.setCursor(LX + 8, y); spr.printf("Lv %u", stats().level);
+  spr.setCursor(rowLeft(y + 10) + 20, y + 1);
+  spr.printf("Lv %u", stats().level);
 
-  y += 36;
-  const int RH = 18;
   spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(LX, y);           spr.printf("approved %u", stats().approvals);
-  spr.setCursor(LX, y + RH);      spr.printf("denied   %u", stats().denials);
-  uint32_t nap = stats().napSeconds;
-  spr.setCursor(LX, y + RH * 2);  spr.printf("napped   %luh%02lum", nap/3600, (nap/60)%60);
+  const int CL = 130;   // counter column, right of the level pill
+  spr.setCursor(CL, y - 4);
+  spr.printf("ok %u", stats().approvals);
+  spr.setCursor(CL, y + 16);
+  spr.printf("no %u", stats().denials);
+
+  y += 48;
   auto tokFmt = [&](const char* label, uint32_t v, int yPx) {
-    spr.setCursor(LX, yPx);
+    spr.setCursor(rowLeft(yPx + 8) + 10, yPx);
     if (v >= 1000000)   spr.printf("%s%lu.%luM", label, v/1000000, (v/100000)%10);
     else if (v >= 1000) spr.printf("%s%lu.%luK", label, v/1000, (v/100)%10);
     else                spr.printf("%s%lu", label, v);
   };
-  tokFmt("tokens   ", stats().tokens, y + RH * 3);
-  tokFmt("today    ", tama.tokensToday, y + RH * 4);
+  tokFmt("tokens ", stats().tokens, y);
+  tokFmt("today  ", tama.tokensToday, y + 20);
+
+  // Transcript fills the rest of the circle at size 3.
+  spr.drawFastHLine(rowLeft(y + 46) + 10, y + 46,
+                    rowHalf(y + 46) * 2 - 20, p.textDim);
+  drawTranscript(p, y + 58, 3, 3);
   spr.setTextSize(1);
 }
 
@@ -882,31 +874,30 @@ void drawPet() {
   spr.setTextSize(1);
 }
 
-void drawHUD() {
-  if (tama.promptId[0]) { drawApproval(); return; }
-  const Palette& p = characterPalette();
-  // Was 3 rows of size-1 text pinned to the bottom edge. At size 1 that is
-  // 126px of text on a 360px panel, and the bottom edge is where the circle
-  // narrows most. Size 2, and lifted clear of the curve.
-  // The pet occupies y 10..214, so the transcript gets the band below it.
-  // It was at y=250 before, where the circle has already narrowed to ~200px
-  // and lines wrapped at 15 characters - short enough that a single
-  // transcript entry fragmented across all three rows.
-  const int SHOW = 3, LH = 24, TOP = 228;
-  const int AREA = SHOW * LH + 6;
-  const int PAD = 10;
-  // Wrap to the narrowest row the block uses, so no line overruns the arc.
-  const int WIDTH = (rowHalf(TOP + AREA) * 2 - PAD * 2) / 12;
-  spr.fillRect(0, TOP - 4, W, AREA, p.bg);
-  spr.setTextSize(2);
+// Transcript rows, rendered wherever a screen wants them. Split out of
+// drawHUD() so the pet page can show it at a larger text size than the home
+// screen ever had room for.
+//
+// `size` is the text scale; rows wrap to whatever fits the chord at the
+// narrowest row of the block, so nothing runs under the bezel.
+static void drawTranscript(const Palette& p, int top, int rows, uint8_t size) {
+  const int lh  = size * 8 + 8;
+  const int pad = 10;
+  const int gw  = size * 6;
+  const int area = rows * lh + 6;
+  const int width = (rowHalf(top + area) * 2 - pad * 2) / gw;
+
+  spr.fillRect(0, top - 4, W, area, p.bg);
+  spr.setTextSize(size);
 
   if (tama.lineGen != lastLineGen) { msgScroll = 0; lastLineGen = tama.lineGen; wake(); }
 
   if (tama.nLines == 0) {
     spr.setTextColor(p.text, p.bg);
     spr.setTextDatum(MC_DATUM);
-    spr.drawString(tama.msg, CX, TOP + LH);
+    spr.drawString(tama.msg, CX, top + lh / 2);
     spr.setTextDatum(TL_DATUM);
+    spr.setTextSize(1);
     return;
   }
 
@@ -916,31 +907,70 @@ void drawHUD() {
   static uint8_t srcOf[32];
   uint8_t nDisp = 0;
   for (uint8_t i = 0; i < tama.nLines && nDisp < 32; i++) {
-    uint8_t got = wrapInto(tama.lines[i], &disp[nDisp], 32 - nDisp, WIDTH);
+    uint8_t got = wrapInto(tama.lines[i], &disp[nDisp], 32 - nDisp,
+                           (uint8_t)(width > 23 ? 23 : width));
     for (uint8_t j = 0; j < got; j++) srcOf[nDisp + j] = i;
     nDisp += got;
   }
 
-  uint8_t maxBack = (nDisp > SHOW) ? (nDisp - SHOW) : 0;
+  uint8_t maxBack = (nDisp > rows) ? (nDisp - rows) : 0;
   if (msgScroll > maxBack) msgScroll = maxBack;
 
-  int end = (int)nDisp - msgScroll;
-  int start = end - SHOW; if (start < 0) start = 0;
+  int endRow = (int)nDisp - msgScroll;
+  int startRow = endRow - rows; if (startRow < 0) startRow = 0;
   uint8_t newest = tama.nLines - 1;
-  for (int i = 0; start + i < end; i++) {
-    uint8_t row = start + i;
+  for (int i = 0; startRow + i < endRow; i++) {
+    uint8_t row = startRow + i;
     bool fresh = (srcOf[row] == newest) && (msgScroll == 0);
-    int y = TOP + i * LH;
+    int y = top + i * lh;
     spr.setTextColor(fresh ? p.text : p.textDim, p.bg);
-    spr.setCursor(rowLeft(y + 16) + PAD, y);
+    spr.setCursor(rowLeft(y + size * 4) + pad, y);
     spr.print(disp[row]);
   }
   if (msgScroll > 0) {
-    int y = TOP + (SHOW - 1) * LH;
+    int y = top + (rows - 1) * lh;
     spr.setTextColor(p.body, p.bg);
     spr.setTextSize(1);
-    spr.setCursor(rowRight(y + 16) - PAD - 18, y + 6);
+    spr.setCursor(rowRight(y + 8) - pad - 18, y + 6);
     spr.printf("-%u", msgScroll);
+  }
+  spr.setTextSize(1);
+}
+
+// Home screen strip under the pet: mood, fed, energy, at a glance.
+//
+// Deliberately wordless. The equivalent rows on the pet page carry labels,
+// but here the shapes carry the meaning (hearts / dots / bars) and dropping
+// the labels buys enough width to draw the indicators large enough to read
+// across a desk - which text at this physical size is not.
+static void drawHomeStats(const Palette& p) {
+  const int TOP = 222;
+  spr.fillRect(0, TOP - 6, W, H - TOP + 6, p.bg);
+
+  if (tama.promptId[0]) { drawApproval(); return; }
+  if (tama.lineGen != lastLineGen) { lastLineGen = tama.lineGen; wake(); }
+
+  int y = TOP + 6;
+  uint8_t mood = statsMoodTier();
+  uint16_t moodCol = (mood >= 3) ? RED : (mood >= 2) ? HOT : p.textDim;
+  int x = CX - (4 * 26) / 2 + 13;
+  for (int i = 0; i < 4; i++) tinyHeart(x + i * 26, y, i < mood, moodCol);
+
+  y += 30;
+  uint8_t fed = statsFedProgress();
+  x = CX - (10 * 15) / 2 + 7;
+  for (int i = 0; i < 10; i++) {
+    if (i < fed) spr.fillCircle(x + i * 15, y, 4, p.body);
+    else         spr.drawCircle(x + i * 15, y, 4, p.textDim);
+  }
+
+  y += 28;
+  uint8_t en = statsEnergyTier();
+  uint16_t enCol = (en >= 4) ? 0x07FF : (en >= 2) ? 0xFFE0 : HOT;
+  x = CX - (5 * 22) / 2 + 3;
+  for (int i = 0; i < 5; i++) {
+    if (i < en) spr.fillRect(x + i * 22, y - 6, 16, 12, enCol);
+    else        spr.drawRect(x + i * 22, y - 6, 16, 12, p.textDim);
   }
 }
 
@@ -1049,7 +1079,7 @@ void loop() {
       wake();
       beep(1200, 80);   // alert chirp
       // Jump to the approval screen no matter what was open — drawApproval
-      // only runs from drawHUD which only runs in DISP_NORMAL.
+      // only runs from drawHomeStats which only runs in DISP_NORMAL.
       displayMode = DISP_NORMAL;
       menuOpen = settingsOpen = resetOpen = false;
       applyDisplayMode();
@@ -1275,7 +1305,7 @@ void loop() {
     else if (clocking) drawClock();
     else if (displayMode == DISP_INFO) drawInfo();
     else if (displayMode == DISP_PET) drawPet();
-    else if (settings().hud) drawHUD();
+    else if (settings().hud) drawHomeStats(characterPalette());
     if (resetOpen) drawReset();
     else if (settingsOpen) drawSettings();
     else if (menuOpen) drawMenu();

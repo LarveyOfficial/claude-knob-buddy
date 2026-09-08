@@ -132,10 +132,20 @@ reconnects on its own.
 
 |  | Turn knob | Tap screen | Hold screen |
 | --- | --- | --- | --- |
-| **Home** | scroll transcript | next screen | menu |
+| **Home** | — | next screen | menu |
+| **Pet / info** | change page | next screen | menu |
 | **Menu / settings** | move selection | activate | close |
-| **Info / pet** | change page | next screen | menu |
 | **Approval** | **deny** | **tap DENY or APPROVE** | menu |
+
+Screens differ from upstream, which put the transcript on the home screen
+under the pet. On a round face that band is only ~200px wide, so entries
+fragmented across rows and were too small to read. Instead:
+
+- **Home** — the character, with mood / fed / energy as hearts, dots and
+  bars underneath. No labels: the shapes carry the meaning, and the width
+  saved lets the indicators be big enough to read at a glance.
+- **Pet page** — level, approve/deny counts, token totals, then the
+  transcript at size 3 in the wide middle band.
 
 Spin the knob hard to make the pet dizzy.
 
@@ -147,6 +157,15 @@ screen flashing.
 
 `busy` triggers on one running session rather than upstream's three, since
 one session is the common case and the animation otherwise never played.
+Single-GIF states also loop instead of freezing on their last frame.
+
+**Settings → reset → clear pairing** drops the stored BLE keys and nothing
+else. If the device and the desktop ever disagree on the pairing key the
+link authenticates and immediately drops (`auth FAIL` on the serial log),
+and the desktop's Forget button cannot help — it sends `{"cmd":"unpair"}`
+over an encrypted characteristic, which is exactly what has stopped
+working. Clear pairing on the device, remove the device on the host, then
+pair again.
 
 Note the knob scrolls and the tap activates — the opposite of upstream, where
 BtnA stepped the selection and BtnB confirmed it.
