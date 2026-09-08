@@ -53,11 +53,26 @@ class ServerCallbacks : public BLEServerCallbacks {
     Serial.println("[ble] connected");
   }
   void onDisconnect(BLEServer* s) override {
+    onDisconnect(s, nullptr);
+  }
+  // The reason code is the difference between "the host gave up on
+  // encryption" and "the link just ended", which are not otherwise
+  // distinguishable from the outside. 0x13/0x16 are remote/local user
+  // termination; 0x3D is MIC failure, i.e. a stale bond key.
+  void onDisconnect(BLEServer* s, esp_ble_gatts_cb_param_t* param) override {
+    bool wasSecure = secure;
     connected = false;
     secure = false;
     passkey = 0;
     mtu = 23;
-    Serial.println("[ble] disconnected");
+    if (param) {
+      Serial.printf("[ble] disconnected reason=0x%02X secure_was=%d bonds=%d\n",
+                    param->disconnect.reason, wasSecure ? 1 : 0,
+                    esp_ble_get_bond_device_num());
+    } else {
+      Serial.printf("[ble] disconnected (no reason) secure_was=%d bonds=%d\n",
+                    wasSecure ? 1 : 0, esp_ble_get_bond_device_num());
+    }
     // Restart advertising so the next client can find us.
     BLEDevice::startAdvertising();
   }
@@ -131,7 +146,9 @@ void bleInit(const char* deviceName) {
   adv->setMinPreferred(0x06);   // iOS-friendly connection interval
   adv->setMaxPreferred(0x12);
   BLEDevice::startAdvertising();
-  Serial.printf("[ble] advertising as '%s'\n", deviceName);
+  // Ground truth for what is on air, rather than what we asked for.
+  Serial.printf("[ble] advertising as '%s' addr=%s\n",
+                deviceName, BLEDevice::getAddress().toString().c_str());
 }
 
 bool bleConnected() { return connected; }

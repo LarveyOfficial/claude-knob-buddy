@@ -182,16 +182,71 @@ knob turns so no decision can be sent.
 one session is the common case and the animation otherwise never played.
 Single-GIF states also loop instead of freezing on their last frame.
 
-**Settings → reset → clear pairing** drops the stored BLE keys and nothing
-else. If the device and the desktop ever disagree on the pairing key the
-link authenticates and immediately drops (`auth FAIL` on the serial log),
-and the desktop's Forget button cannot help — it sends `{"cmd":"unpair"}`
-over an encrypted characteristic, which is exactly what has stopped
-working. Clear pairing on the device, remove the device on the host, then
-pair again.
+### When it will not pair
+
+Symptoms, in the order they are worth checking:
+
+1. **`auth FAIL` in the serial log** — the two sides hold different pairing
+   keys. The desktop's Forget button cannot fix this: it sends
+   `{"cmd":"unpair"}` over an encrypted characteristic, which is precisely
+   what has stopped working.
+2. **`disconnected reason=0x13` with `bonds=0`** — the device has no key and
+   is asking to pair; the host is refusing and hanging up (`0x13` is
+   *remote user terminated*). macOS persists BLE bonds to disk, so it does
+   this when it thinks it already knows the device.
+
+The recovery that works:
+
+- **Settings → reset → clear pairing** on the device. This drops the stored
+  keys and rotates the BLE address (see below). Settings, stats and the
+  installed character all survive.
+- **Toggle Bluetooth off and back on** on the Mac, from the menu bar.
+- Reconnect and enter the passkey.
+
+Do **not** `sudo pkill bluetoothd`. It does not clear an on-disk bond, and
+it leaves Bluetooth in a state where nothing is discoverable until you
+toggle it off and on anyway.
+
+**Identity rotation.** `clear pairing` also bumps a counter in NVS that
+perturbs the last two bytes of the BLE address, so the host sees a device it
+has never met. Rotation 0 is the factory address, so a device that has never
+needed recovery keeps the name it shipped with; the advertised
+`Claude-XXXX` name changes when it rotates, so pick the new one in the
+picker. Only the NIC-specific bytes change — setting the
+locally-administered bit in the OUI stops the device advertising entirely,
+because a BLE public address is meant to be IEEE-assigned.
+
+Whether rotation is strictly necessary is unproven: the one case observed
+was resolved with a rotated address *and* a Bluetooth toggle, and the toggle
+alone may have been enough.
 
 Note the knob scrolls and the tap activates — the opposite of upstream, where
 BtnA stepped the selection and BtnB confirmed it.
+
+## Stats
+
+Four indicators, and two of them work differently from upstream because the
+signals upstream used do not exist here.
+
+| | Source |
+| --- | --- |
+| **Fed** (10 dots) | Output tokens: one dot per 5K, wrapping every 50K |
+| **Level** | 50K tokens each; crossing one fires the celebrate animation |
+| **Mood** (4 hearts) | Median of the last 8 "how long did anything sit blocked" times, minus a penalty if denials outweigh approvals |
+| **Energy** (5 bars) | Drains one bar per ~30 min with sessions running, recovers one per ~20 min idle |
+
+**Mood** upstream was fed only by manual approvals. With auto-approval on
+there is never a sample, and the no-data path returns a fixed middle value —
+so mood was not slow to move, it was inert. It now times how long
+`waiting` stays above zero and records that when it clears, whether a human
+or auto mode cleared it. Same meaning ("is anything stuck?"), works either
+way.
+
+**Energy** upstream drained on a timer and only refilled when you lifted the
+stick out of a face-down nap. That gesture needs an accelerometer, so on
+this board the refill hook had no caller at all and energy fell to zero
+after ~6h of uptime and stayed there. Tying it to whether Claude is working
+keeps the "sleeps when nothing's happening" idea without needing hardware.
 
 ## Pets and characters
 

@@ -21,9 +21,28 @@ TFT_eSprite spr(PANEL_W, PANEL_H, &lcdPanel);
 // btName for the BLUETOOTH info page.
 static char btName[16] = "Claude";
 static void startBt() {
+  // Apply the identity rotation before anything reads a MAC. Rotation 0 is
+  // the factory address, so a device that has never needed recovery keeps
+  // the address and name it shipped with.
+  uint8_t rot = btRotLoad();
+  if (rot) {
+    uint8_t base[6] = {0};
+    if (esp_efuse_mac_get_default(base) == ESP_OK) {
+      // Perturb only the NIC-specific bytes and leave the OUI alone. An
+      // earlier version set the locally-administered bit in base[0], which
+      // stopped the device advertising at all: a BLE public address is
+      // meant to be IEEE-assigned, and the controller does not accept one
+      // with that bit flipped.
+      base[5] ^= rot;
+      base[4] ^= (uint8_t)(rot * 31);
+      esp_base_mac_addr_set(base);
+    }
+  }
+
   uint8_t mac[6] = {0};
   esp_read_mac(mac, ESP_MAC_BT);
   snprintf(btName, sizeof(btName), "Claude-%02X%02X", mac[4], mac[5]);
+  Serial.printf("[ble] identity rotation %u -> %s\n", rot, btName);
   bleInit(btName);
 }
 
@@ -267,10 +286,15 @@ static void applyReset(uint8_t idx) {
       d.close();
     }
   } else if (idx == 1) {
-    // clear pairing: drop stored LTKs only. Settings, stats and the
-    // installed character all survive; the next connect re-pairs with a
-    // fresh passkey.
+    // clear pairing: drop our stored LTKs *and* rotate the BLE address.
+    // Dropping the bond alone is not enough - the host keeps its own copy on
+    // disk and refuses to re-pair a device it thinks it knows, so the link
+    // dies before authentication (HCI reason 0x13). A new address makes us a
+    // device it has never seen. Settings, stats and the installed character
+    // all survive; the advertised name changes, so pick the new one in the
+    // desktop picker.
     bleClearBonds();
+    btRotBump();
   } else {
     // factory reset: NVS namespace wipe + filesystem format + BLE bonds.
     // Clears stats, owner, petname, species, settings, GIF characters,
@@ -875,16 +899,16 @@ static void drawPetHowTo(const Palette& p) {
   y += 20;  // room for the PET header drawn by drawPet()
 
   ln(p.body,    "MOOD");
-  ln(p.textDim, " approve fast = up");
+  ln(p.textDim, " nothing kept");
+  ln(p.textDim, " waiting = up");
   ln(p.textDim, " deny lots = down"); gap();
 
   ln(p.body,    "FED");
   ln(p.textDim, " 50K tokens = level"); gap();
 
-  // Energy used to refill by laying the stick face-down. Without an IMU
-  // there is no nap gesture, so energy only recovers over time.
   ln(p.body,    "ENERGY");
-  ln(p.textDim, " recovers while idle"); gap();
+  ln(p.textDim, " drains as I work");
+  ln(p.textDim, " back up when idle"); gap();
 
   ln(p.textDim, "idle 30s = screen off");
   ln(p.textDim, "tap = wake");
@@ -1108,6 +1132,24 @@ void loop() {
   uint32_t now = millis();
 
   dataPoll(&tama);
+
+  // Energy integrates against whether Claude is working, which replaces the
+  // face-down nap the IMU used to provide.
+  statsEnergyUpdate(tama.sessionsRunning > 0);
+
+  // Mood: time how long anything stays blocked, and record it when it
+  // clears - whether a human tapped APPROVE or auto mode handled it. With
+  // only the manual-approval hook, auto mode never produced a sample.
+  {
+    static uint32_t waitStartMs = 0;
+    if (tama.sessionsWaiting > 0) {
+      if (waitStartMs == 0) waitStartMs = millis();
+    } else if (waitStartMs != 0) {
+      statsOnWaitCleared((millis() - waitStartMs) / 1000);
+      waitStartMs = 0;
+    }
+  }
+
   if (statsPollLevelUp()) triggerOneShot(P_CELEBRATE, 3000);
   baseState = derive(tama);
   // derive() reaches attention via sessionsWaiting, which covers permission
@@ -1216,6 +1258,10 @@ void loop() {
           sendCmd(cmd);
           responseSent = true;
           if (approve) {
+            // statsOnApproval also records velocity. The wait-cleared timer
+            // will fire for the same event a moment later; both measure the
+            // same delay, so the duplicate is harmless and keeps the
+            // approvals counter honest.
             uint32_t tookS = (millis() - promptArrivedMs) / 1000;
             statsOnApproval(tookS);
             beep(2400, 60);

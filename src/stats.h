@@ -60,14 +60,29 @@ inline void statsSave() {
   _dirty = false;
 }
 
-// Level is token-driven now; approvals only feed mood/velocity.
-inline void statsOnApproval(uint32_t secondsToRespond) {
-  _stats.approvals++;
-  _stats.velocity[_stats.velIdx] =
-      (uint16_t)min(secondsToRespond, (uint32_t)65535u);
+// Records a response time into the ring buffer that drives mood.
+inline void statsRecordVelocity(uint32_t seconds) {
+  _stats.velocity[_stats.velIdx] = (uint16_t)min(seconds, (uint32_t)65535u);
   _stats.velIdx = (_stats.velIdx + 1) % 8;
   if (_stats.velCount < 8) _stats.velCount++;
   _dirty = true; statsSave();
+}
+
+// Level is token-driven now; approvals only feed mood/velocity.
+inline void statsOnApproval(uint32_t secondsToRespond) {
+  _stats.approvals++;
+  statsRecordVelocity(secondsToRespond);
+}
+
+// How long a session sat blocked, regardless of who unblocked it.
+//
+// Mood used to be fed only by manual approvals, so with auto-approval on
+// there was never a sample and statsMoodTier() returned its no-data value
+// forever - mood was inert, not merely slow. Timing the whole waiting
+// period instead keeps the original meaning ("is anything stuck?") and
+// works whether a human or auto mode clears it.
+inline void statsOnWaitCleared(uint32_t seconds) {
+  statsRecordVelocity(seconds);
 }
 
 // Tokens feed the pet. 50K per level, 5K per pip on the fed bar.
@@ -158,17 +173,40 @@ inline uint8_t statsMoodTier() {
   return (uint8_t)tier;
 }
 
-// Energy: starts at 3/5 on boot, tops up to full on nap end, drains 1 tier per 2h.
-static uint32_t _lastNapEndMs = 0;
-static uint8_t  _energyAtNap  = 3;
+// Energy, 0..5.
+//
+// Upstream drained a tier every 2h and only ever refilled when you picked
+// the stick up out of a face-down nap. That gesture needs an accelerometer,
+// which this board does not have, so statsOnWake() lost its only caller and
+// energy drained to zero after ~6h of uptime and stayed there.
+//
+// It now tracks work instead: drains while sessions are running, recovers
+// while nothing is. Same "sleeps when nothing's happening" idea, no
+// hardware needed.
+static const uint32_t ENERGY_DRAIN_MS   = 30UL * 60UL * 1000UL;  // per tier
+static const uint32_t ENERGY_RECOVER_MS = 20UL * 60UL * 1000UL;  // per tier
+static int32_t  _energyMilli   = 3000;   // tiers * 1000, starts at 3/5
+static uint32_t _energyLastMs  = 0;
 
-inline void statsOnWake() { _lastNapEndMs = millis(); _energyAtNap = 5; }
+inline void statsEnergyUpdate(bool working) {
+  uint32_t now = millis();
+  if (_energyLastMs == 0) { _energyLastMs = now; return; }
+  uint32_t dt = now - _energyLastMs;
+  if (dt < 1000) return;              // integrate at most once a second
+  _energyLastMs = now;
+  int32_t per = working ? -(int32_t)ENERGY_DRAIN_MS : (int32_t)ENERGY_RECOVER_MS;
+  _energyMilli += (int32_t)((int64_t)dt * 1000 / per);
+  if (_energyMilli < 0)    _energyMilli = 0;
+  if (_energyMilli > 5000) _energyMilli = 5000;
+}
+
+// Kept so the name still means something: a full night idle tops you up.
+inline void statsOnWake() { _energyMilli = 5000; _energyLastMs = millis(); }
 
 inline uint8_t statsEnergyTier() {
-  uint32_t hoursSince = (millis() - _lastNapEndMs) / 3600000;
-  int8_t e = (int8_t)_energyAtNap - (int8_t)(hoursSince / 2);
-  if (e < 0) e = 0; if (e > 5) e = 5;
-  return (uint8_t)e;
+  int32_t t = _energyMilli / 1000;
+  if (t < 0) t = 0; if (t > 5) t = 5;
+  return (uint8_t)t;
 }
 
 inline uint8_t statsFedProgress() {
@@ -261,6 +299,31 @@ inline uint8_t speciesIdxLoad() {
 inline void speciesIdxSave(uint8_t idx) {
   _prefs.begin("buddy", false);
   _prefs.putUChar("species", idx);
+  _prefs.end();
+}
+
+// BLE identity rotation counter.
+//
+// macOS persists BLE bonds to disk keyed by device address, and will not
+// re-pair a device it believes it already knows: it reconnects assuming the
+// old key, the device asks to pair fresh, and the host terminates the link
+// (HCI reason 0x13). Clearing the bond on the device alone cannot fix that -
+// it is what creates the mismatch. Restarting bluetoothd does not help
+// either, because the bond is on disk.
+//
+// Bumping this counter derives a new BLE address, so the host sees a device
+// it has never met and pairs normally. It must persist, or every boot would
+// look like a new device and a bond could never stick.
+inline uint8_t btRotLoad() {
+  _prefs.begin("buddy", true);
+  uint8_t v = _prefs.getUChar("btrot", 0);
+  _prefs.end();
+  return v;
+}
+
+inline void btRotBump() {
+  _prefs.begin("buddy", false);
+  _prefs.putUChar("btrot", (uint8_t)(_prefs.getUChar("btrot", 0) + 1));
   _prefs.end();
 }
 
