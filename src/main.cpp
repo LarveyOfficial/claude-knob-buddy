@@ -433,7 +433,10 @@ PersonaState derive(const TamaState& s) {
   if (!s.connected)            return P_IDLE;
   if (s.sessionsWaiting > 0)   return P_ATTENTION;
   if (s.recentlyCompleted)     return P_CELEBRATE;
-  if (s.sessionsRunning >= 3)  return P_BUSY;
+  // Upstream required three concurrent sessions. In practice you almost
+  // always have exactly one, so busy.gif never played and the pet sat in
+  // the idle carousel while Claude was clearly working.
+  if (s.sessionsRunning >= 1)  return P_BUSY;
   return P_IDLE;   // connected, 0+ sessions, nothing urgent — hang out
 }
 
@@ -885,7 +888,11 @@ void drawHUD() {
   // Was 3 rows of size-1 text pinned to the bottom edge. At size 1 that is
   // 126px of text on a 360px panel, and the bottom edge is where the circle
   // narrows most. Size 2, and lifted clear of the curve.
-  const int SHOW = 3, LH = 22, TOP = 250;
+  // The pet occupies y 10..214, so the transcript gets the band below it.
+  // It was at y=250 before, where the circle has already narrowed to ~200px
+  // and lines wrapped at 15 characters - short enough that a single
+  // transcript entry fragmented across all three rows.
+  const int SHOW = 3, LH = 24, TOP = 228;
   const int AREA = SHOW * LH + 6;
   const int PAD = 10;
   // Wrap to the narrowest row the block uses, so no line overruns the arc.
@@ -991,6 +998,15 @@ void setup() {
 
 void loop() {
   inputUpdate();   // replaces M5.update(): polls touch, drains knob detents
+
+  // A folder push that loses its link must be torn down, or _xActive stays
+  // stuck true and the retry after reconnect starts from half-written state.
+  {
+    static bool wasLinked = false;
+    bool linked = bleConnected();
+    if (wasLinked && !linked) xferAbort();
+    wasLinked = linked;
+  }
   t++;
   uint32_t now = millis();
 
@@ -1173,10 +1189,23 @@ void loop() {
   clockRefreshRtc();   // 1Hz internal throttle; also caches _onUsb
   // Show the clock when nothing is happening — bridge heartbeat alone
   // doesn't count as activity (it's the only way to get the RTC synced).
+  // Upstream only showed the clock while charging, which on the stick meant
+  // "sitting in its cradle". There is no power sensing here, so _onUsb is
+  // hardcoded true - and using it directly made the clock take over the
+  // moment Claude went quiet and hand back on the next message, which reads
+  // as the screen flashing between two layouts. Gate on *sustained* idle
+  // instead so the swap is a deliberate, rare event.
+  static uint32_t idleSince = 0;
+  bool anyActivity = tama.sessionsRunning > 0 || tama.sessionsWaiting > 0;
+  if (anyActivity || !tama.connected) idleSince = 0;
+  else if (idleSince == 0)            idleSince = now;
+  const uint32_t CLOCK_IDLE_MS = 60000;
+  bool longIdle = idleSince != 0 && (now - idleSince) > CLOCK_IDLE_MS;
+
   bool clocking = displayMode == DISP_NORMAL
                && !menuOpen && !settingsOpen && !resetOpen && !inPrompt
-               && tama.sessionsRunning == 0 && tama.sessionsWaiting == 0
-               && dataRtcValid() && _onUsb;
+               && !anyActivity
+               && dataRtcValid() && longIdle;
   // The original had a second, landscape clock mode selected by tilting the
   // stick. No IMU and a round panel mean there is only one face now, so the
   // landscapeClock branch is gone entirely.
@@ -1250,7 +1279,17 @@ void loop() {
     if (resetOpen) drawReset();
     else if (settingsOpen) drawSettings();
     else if (menuOpen) drawMenu();
-    spr.pushSprite(0, 0);
+
+    // During a folder push the loop period sets the transfer rate: the
+    // desktop waits for an ack per chunk, and an ack only goes out when
+    // dataPoll() runs. A full-frame flush is ~26ms of that, so throttle the
+    // progress screen to ~4fps and let the remaining iterations be spent
+    // draining chunks instead of redrawing a progress bar.
+    static uint32_t lastPush = 0;
+    if (!xferActive() || millis() - lastPush >= 250) {
+      lastPush = millis();
+      spr.pushSprite(0, 0);
+    }
   }
 
   // The face-down nap loop lived here. It needed the IMU to detect being
@@ -1266,5 +1305,25 @@ void loop() {
     screenOff = true;
   }
 
-  delay(screenOff ? 100 : 16);
+  // Loop-period stats. Off by default - build with -DKNOB_LOOP_STATS to
+  // re-enable. This is what identified the folder-push bottleneck: 57ms per
+  // iteration, and since an ack only goes out when dataPoll() runs, the loop
+  // period *was* the transfer rate.
+#ifdef KNOB_LOOP_STATS
+  {
+    static uint32_t prev = 0, worst = 0, lastReport = 0, iters = 0, sum = 0;
+    uint32_t t0 = millis();
+    if (prev) { uint32_t dt = t0 - prev; sum += dt; iters++; if (dt > worst) worst = dt; }
+    prev = t0;
+    if (t0 - lastReport > 1000) {
+      lastReport = t0;
+      Serial.printf("[loop] avg=%lums worst=%lums iters=%lu xfer=%d\n",
+                    (unsigned long)(iters ? sum / iters : 0),
+                    (unsigned long)worst, (unsigned long)iters, xferActive() ? 1 : 0);
+      worst = 0; iters = 0; sum = 0;
+    }
+  }
+#endif
+
+  delay(screenOff ? 100 : (xferActive() ? 1 : 16));
 }

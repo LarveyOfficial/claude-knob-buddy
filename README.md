@@ -78,6 +78,29 @@ pio run -e paneltest -t upload --upload-port ...   # panel, colours, geometry
 pio run -e inputtest -t upload --upload-port ...   # I2C scan, touch, knob, haptics
 ```
 
+## Installing a character pack
+
+**Use USB, not the BLE drop target.** The desktop sends 256-byte chunks and
+waits for an ack on each one, which tops out near 3 KB/s; the 569 KB `bufo`
+pack needs about three minutes at that rate and the transfer times out
+partway through. Measured on this board, the link dropped at ~37%.
+
+```bash
+KNOB_PORT=/dev/cu.usbmodemXXXX python3 tools/flash_character.py characters/bufo
+```
+
+That stages the pack into `data/` and writes the whole LittleFS image in
+under 40 seconds. `uploadfs` replaces the entire filesystem, so the pack
+becomes the only character installed.
+
+Because USB flashing bypasses the BLE `char_end` handler that would normally
+select the new pack, switch to it once by hand: **hold the screen → turn to
+`ascii pet` → tap past the 18 species to the GIF entry**.
+
+Character art is upscaled by the largest integer factor that fits the home
+box, so the 96px-wide packs authored for the stick render at 2x (192x200)
+here rather than as a postage stamp.
+
 ### Build notes worth knowing
 
 - **`pioarduino` 51.03.07 is required.** Stock `platform = espressif32` ships
@@ -114,8 +137,16 @@ reconnects on its own.
 | **Info / pet** | change page | next screen | menu |
 | **Approval** | **deny** | **tap DENY or APPROVE** | menu |
 
-Spin the knob hard to make the pet dizzy. The screen sleeps after 30s idle
-(kept awake while an approval is pending); any touch wakes it.
+Spin the knob hard to make the pet dizzy.
+
+The clock face takes over after 60s with no Claude activity. Upstream gated
+it on USB charging; there is no power sensing here, so it is gated on
+sustained idle instead — driving it directly off "always on mains" made the
+clock and the transcript swap places on every message, which reads as the
+screen flashing.
+
+`busy` triggers on one running session rather than upstream's three, since
+one session is the common case and the animation otherwise never played.
 
 Note the knob scrolls and the tap activates — the opposite of upstream, where
 BtnA stepped the selection and BtnB confirmed it.

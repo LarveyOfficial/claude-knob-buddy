@@ -1,17 +1,36 @@
 #!/usr/bin/env python3
 """
 Flash a prepped character pack via USB (pio run -t uploadfs).
-Faster than the BLE drop target when you're iterating on a character.
+
+On this board USB is not merely faster than the BLE drop target - it is the
+only transport that works for a full-size pack. The desktop sends 256-byte
+chunks and waits for an ack on each, which tops out around 3 KB/s, so a
+~570 KB pack needs about three minutes and the transfer times out first.
+USB writes the whole filesystem image in a few seconds.
 
 Usage:
   python3 tools/flash_character.py characters/bufo
 """
-import json, sys, shutil, subprocess
+import json, os, shutil, subprocess, sys
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
 DATA    = PROJECT / "data" / "characters"
 CAP     = 1_800_000
+# This fork defines three environments (knob, paneltest, inputtest), so the
+# target has to be named or PlatformIO would build all of them.
+ENV     = "knob"
+
+
+def pio_bin() -> str:
+    """PlatformIO is often installed in its own venv and not on PATH."""
+    found = shutil.which("pio")
+    if found:
+        return found
+    venv = Path.home() / ".platformio" / "penv" / "bin" / "pio"
+    if venv.exists():
+        return str(venv)
+    sys.exit("pio not found - install PlatformIO Core or put pio on PATH")
 
 
 def flash(src: Path) -> None:
@@ -31,8 +50,16 @@ def flash(src: Path) -> None:
     shutil.copytree(src, dst)
     print(f"staged {name}: {total:,} bytes -> {dst}")
 
-    subprocess.run(["pio", "run", "-t", "uploadfs"], cwd=PROJECT, check=True)
-    print(f"\nflashed. on the stick: hold A -> settings -> species -> GIF")
+    cmd = [pio_bin(), "run", "-e", ENV, "-t", "uploadfs"]
+    port = os.environ.get("KNOB_PORT")
+    if port:
+        cmd += ["--upload-port", port]
+    print("+ " + " ".join(cmd))
+    subprocess.run(cmd, cwd=PROJECT, check=True)
+    print("\nflashed. uploadfs replaces the whole filesystem, so the pack is")
+    print("now the only character installed and the firmware picks it up on")
+    print("reboot. To switch back to ASCII: hold the screen -> settings ->")
+    print("ascii pet.")
 
 
 if __name__ == "__main__":

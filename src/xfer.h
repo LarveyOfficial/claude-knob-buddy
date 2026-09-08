@@ -9,6 +9,13 @@ static File     _xFile;
 static uint32_t _xExpected = 0, _xWritten = 0;
 static char     _xCharName[24] = "";
 static bool     _xActive = false;
+// Write coalescing buffer (see the chunk handler) plus timing stats, which
+// are what identified the stall in the first place.
+static uint8_t  _xBuf[4096];
+static size_t   _xBufLen = 0;
+static uint32_t _xWriteWorstMs = 0;
+
+static void _xFlushBuf();
 static uint32_t _xTotal = 0, _xTotalWritten = 0;
 
 // Ack goes to both streams — we don't track which one delivered the command,
@@ -208,16 +215,25 @@ inline bool xferCommand(JsonDocument& doc) {
     int rc = mbedtls_base64_decode(buf, sizeof(buf), &outLen,
                                    (const uint8_t*)b64, strlen(b64));
     if (rc != 0) { _xAck("chunk", false); return true; }
-    _xFile.write(buf, outLen);
+
+    // The desktop sends 256-byte chunks, which for a ~480KB pack is close to
+    // 2000 separate LittleFS writes. Each one can trigger a metadata commit,
+    // and a commit deep into the transfer blocks long enough to risk the BLE
+    // supervision timeout. Coalescing into 4KB blocks cuts the number of
+    // filesystem operations by 16x.
+    if (_xBufLen + outLen > sizeof(_xBuf)) _xFlushBuf();
+    memcpy(_xBuf + _xBufLen, buf, outLen);
+    _xBufLen += outLen;
+
     _xWritten += outLen;
     _xTotalWritten += outLen;
-    // Ack every chunk — LittleFS writes can block on flash erase and the
-    // UART RX buffer is only ~256 bytes. Without this the sender overruns it.
+    // Ack every chunk — the sender waits for each one before continuing.
     _xAck("chunk", true, _xWritten);
     return true;
   }
 
   if (strcmp(cmd, "file_end") == 0) {
+    _xFlushBuf();
     bool ok = _xFile && (_xWritten == _xExpected || _xExpected == 0);
     if (_xFile) _xFile.close();
     _xAck("file_end", ok, _xWritten);
@@ -236,6 +252,35 @@ inline bool xferCommand(JsonDocument& doc) {
   return false;
 }
 
+static void _xFlushBuf() {
+  if (!_xBufLen) return;
+  if (_xFile) {
+    uint32_t t0 = millis();
+    _xFile.write(_xBuf, _xBufLen);
+    uint32_t dt = millis() - t0;
+    if (dt > _xWriteWorstMs) _xWriteWorstMs = dt;
+    if (dt > 200) Serial.printf("[xfer] slow write %lums (%u bytes)\n",
+                                (unsigned long)dt, (unsigned)_xBufLen);
+  }
+  _xBufLen = 0;
+}
+
 inline bool xferActive() { return _xActive; }
+
+// Called when the BLE link drops mid-transfer. Without this, _xActive stays
+// true forever (it is only cleared by char_end), the partial file stays open,
+// and the next char_begin after a reconnect starts from corrupt state - which
+// is why a retry used to fail immediately instead of starting over.
+inline void xferAbort() {
+  if (!_xActive) return;
+  Serial.printf("[xfer] ABORT at %lu/%lu bytes, worst write %lums\n",
+                (unsigned long)_xTotalWritten, (unsigned long)_xTotal,
+                (unsigned long)_xWriteWorstMs);
+  _xBufLen = 0;
+  if (_xFile) _xFile.close();
+  _xActive = false;
+  _xWritten = 0;
+  _xWriteWorstMs = 0;
+}
 inline uint32_t xferProgress() { return _xTotalWritten; }
 inline uint32_t xferTotal() { return _xTotal; }

@@ -47,11 +47,32 @@ static bool        peekMode = false;
 static TFT_eSPI*   _tgt = &spr;
 // Peek mode renders at half scale (2:1 nearest-neighbor in gifDrawCb) so
 // the whole pet fits the 70px window instead of cropping the top.
+//
+// Home mode upscales instead. Packs are authored 96px wide for a 135px
+// panel; drawn 1:1 on a 360px face the character is a postage stamp. The
+// factor is the largest integer that still fits the home box, so art of
+// any size lands sensibly - 96x100 comes out at 2x (192x200), leaving the
+// lower third of the circle for the transcript.
+static int gifScale = 1;
+static const int HOME_TOP = 10;
+static const int HOME_BOT = 214;
+static const int HOME_MAX_W = 300;
+
 static void gifPlace() {
-  int outW = peekMode ? gifW / 2 : gifW;
-  int outH = peekMode ? gifH / 2 : gifH;
+  if (peekMode) {
+    int outW = gifW / 2, outH = gifH / 2;
+    gifX = (spr.width() - outW) / 2;
+    gifY = (PEEK_TOP - outH) / 2;
+    gifScale = 1;
+    return;
+  }
+  int boxH = HOME_BOT - HOME_TOP;
+  int s = 1;
+  while (s < 4 && gifW * (s + 1) <= HOME_MAX_W && gifH * (s + 1) <= boxH) s++;
+  gifScale = s;
+  int outW = gifW * s, outH = gifH * s;
   gifX = (spr.width() - outW) / 2;
-  gifY = peekMode ? (PEEK_TOP - outH) / 2 : (140 - outH) / 2;
+  gifY = HOME_TOP + (boxH - outH) / 2;
 }
 static uint32_t    nextFrameAt = 0;
 static uint32_t    animPauseUntil = 0;
@@ -124,15 +145,45 @@ static void gifDrawCb(GIFDRAW* d) {
     return;
   }
 
-  int y = gifY + srcY;
-  if (y < 0 || y >= spr.height()) return;
-  int x0 = gifX + d->iX;
-  int w  = d->iWidth;
-  if (w > 256) w = 256;
-  if (x0 < 0) { src -= x0; w += x0; x0 = 0; }
-  if (x0 + w > spr.width()) w = spr.width() - x0;
-  if (w <= 0) return;
-  for (int i = 0; i < w; i++) put(x0 + i, y, src[i]);
+  const int sc = gifScale;
+  if (sc == 1) {
+    int y = gifY + srcY;
+    if (y < 0 || y >= spr.height()) return;
+    int x0 = gifX + d->iX;
+    int w  = d->iWidth;
+    if (w > 256) w = 256;
+    if (x0 < 0) { src -= x0; w += x0; x0 = 0; }
+    if (x0 + w > spr.width()) w = spr.width() - x0;
+    if (w <= 0) return;
+    for (int i = 0; i < w; i++) put(x0 + i, y, src[i]);
+    return;
+  }
+
+  // Upscaled: expand the scanline once into a row buffer, then blit that
+  // row `sc` times. Doing it per pixel with drawPixel would be sc*sc calls
+  // per source pixel - roughly 120k calls per frame at 2x - whereas this is
+  // sc blits per source row.
+  static uint16_t rowBuf[360];
+  int w = d->iWidth;
+  if (w * sc > (int)(sizeof(rowBuf) / sizeof(rowBuf[0])))
+    w = (int)(sizeof(rowBuf) / sizeof(rowBuf[0])) / sc;
+  for (int i = 0; i < w; i++) {
+    uint8_t idx = src[i];
+    uint16_t c = (hasT && idx == t) ? pal.bg : pal16[idx];
+    for (int k = 0; k < sc; k++) rowBuf[i * sc + k] = c;
+  }
+  int outW = w * sc;
+  int x0 = gifX + d->iX * sc;
+  uint16_t* rp = rowBuf;
+  if (x0 < 0) { rp -= x0; outW += x0; x0 = 0; }
+  if (x0 + outW > spr.width()) outW = spr.width() - x0;
+  if (outW <= 0) return;
+  int yTop = gifY + srcY * sc;
+  for (int k = 0; k < sc; k++) {
+    int y = yTop + k;
+    if (y < 0 || y >= spr.height()) continue;
+    _tgt->draw16bitRGBBitmap(x0, y, rp, outW, 1);
+  }
 }
 
 // --- Public -------------------------------------------------------------

@@ -174,8 +174,11 @@ size_t bleWrite(const uint8_t* data, size_t len) {
     txChar->setValue((uint8_t*)(data + sent), n);
     txChar->notify();
     sent += n;
-    // Small yield so the BLE stack flushes before the next chunk.
-    delay(4);
+    // Small yield so the BLE stack flushes before the next chunk. Only
+    // between chunks: delaying after the last one just adds latency, and
+    // during a folder push every ack is a single chunk, so that delay was
+    // pure cost on the critical path.
+    if (sent < len) delay(4);
   }
   return sent;
 }
