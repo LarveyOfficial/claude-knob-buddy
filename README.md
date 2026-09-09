@@ -210,8 +210,18 @@ Single-GIF states also loop instead of freezing on their last frame.
 
 ### If it drops and will not reconnect
 
-Two separate faults were behind this, both fixed, but worth knowing about
+Three separate faults were behind this, all fixed, but worth knowing about
 if you change the BLE code:
+
+**A dead link does not always raise a disconnect.** This was the one that
+actually mattered. The host can stop talking with no LL termination, and the
+device sits with `connected == true` indefinitely — observed here as
+`conn=1 sec=1` for 23 minutes having received zero bytes. Because the
+advertising restart below only runs while disconnected, the device never
+went back on air, and **Connect** had nothing to find. `REFERENCE.md`
+already states the rule ("if you don't receive a snapshot for ~30 seconds,
+treat the connection as dead"); `bleTick()` now enforces it at 45s — three
+missed keepalives — by forcing the disconnect, which triggers the restart.
 
 **Advertising must not be restarted from the disconnect callback.** Upstream
 calls `startAdvertising()` there. On ESP32 that can silently fail — the

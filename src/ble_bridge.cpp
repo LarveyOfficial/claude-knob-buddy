@@ -32,8 +32,12 @@ static volatile uint16_t  mtu = 23;
 // Advertising restart is deferred out of the disconnect callback and then
 // re-kicked periodically - see bleTick().
 static volatile uint32_t  advertiseAt = 0;
+// Last time any byte arrived from the desktop. The link can die without the
+// controller ever noticing - see the watchdog in bleTick().
+static volatile uint32_t  lastRxMs = 0;
 
 static void rxPush(const uint8_t* p, size_t n) {
+  lastRxMs = millis();
   for (size_t i = 0; i < n; i++) {
     size_t next = (rxHead + 1) % RX_CAP;
     if (next == rxTail) return;  // full — drop (upstream should keep up)
@@ -55,6 +59,7 @@ class ServerCallbacks : public BLEServerCallbacks {
 
   void onConnect(BLEServer* s, esp_ble_gatts_cb_param_t* param) override {
     connected = true;
+    lastRxMs = millis();   // grace period before the watchdog can fire
     // Relax the connection parameters.
     //
     // Advertising asks for a 7.5-22.5ms interval, which is what a latency
@@ -205,6 +210,29 @@ void bleInit(const char* deviceName) {
 // so a single failed start cannot strand the device off the air.
 void bleTick() {
   uint32_t now = millis();
+
+  // Link watchdog.
+  //
+  // A BLE link can go away without the controller raising a disconnect: the
+  // host stops talking, no LL termination arrives, and the device sits with
+  // connected==true forever. Observed here as conn=1 for 23 minutes with
+  // zero bytes received - and because the advertising restart below only
+  // runs while disconnected, the device never went back on air. That is the
+  // "it drops and Connect does nothing until macOS forgets it" symptom.
+  //
+  // REFERENCE.md states the rule: "If you don't receive a snapshot for ~30
+  // seconds, treat the connection as dead." The desktop sends a keepalive
+  // every 10s, so 45s is three missed keepalives - dead, not merely quiet.
+  if (connected && lastRxMs && (now - lastRxMs) > 45000) {
+    Serial.printf("[ble] watchdog: no data for %lus, dropping link\n",
+                  (unsigned long)((now - lastRxMs) / 1000));
+    if (server) server->disconnect(server->getConnId());
+    connected = false;
+    secure = false;
+    advertiseAt = now + 500;
+    return;
+  }
+
   if (connected) { advertiseAt = 0; return; }
   if (advertiseAt == 0) advertiseAt = now + 10000;
   if ((int32_t)(now - advertiseAt) < 0) return;
