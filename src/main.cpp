@@ -899,9 +899,8 @@ static void drawPetHowTo(const Palette& p) {
   y += 20;  // room for the PET header drawn by drawPet()
 
   ln(p.body,    "MOOD");
-  ln(p.textDim, " nothing kept");
-  ln(p.textDim, " waiting = up");
-  ln(p.textDim, " deny lots = down"); gap();
+  ln(p.textDim, " using me = up");
+  ln(p.textDim, " ignoring me = down"); gap();
 
   ln(p.body,    "FED");
   ln(p.textDim, " 50K tokens = level"); gap();
@@ -1137,15 +1136,18 @@ void loop() {
   // face-down nap the IMU used to provide.
   statsEnergyUpdate(tama.sessionsRunning > 0);
 
-  // Mood: time how long anything stays blocked, and record it when it
-  // clears - whether a human tapped APPROVE or auto mode handled it. With
-  // only the manual-approval hook, auto mode never produced a sample.
+  // Mood rises from token throughput (see statsMoodOnTokens, fed from the
+  // heartbeat) and decays only while no work is arriving. A prompt left
+  // sitting more than a minute is the one thing that still sours it.
+  statsMoodDecay(tama.sessionsRunning > 0);
   {
     static uint32_t waitStartMs = 0;
     if (tama.sessionsWaiting > 0) {
       if (waitStartMs == 0) waitStartMs = millis();
     } else if (waitStartMs != 0) {
-      statsOnWaitCleared((millis() - waitStartMs) / 1000);
+      uint32_t waited = (millis() - waitStartMs) / 1000;
+      statsOnWaitCleared(waited);      // keeps the velocity stat honest
+      statsMoodOnStalled(waited);
       waitStartMs = 0;
     }
   }

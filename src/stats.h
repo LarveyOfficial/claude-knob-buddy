@@ -60,6 +60,8 @@ inline void statsSave() {
   _dirty = false;
 }
 
+inline void statsMoodOnTokens(uint32_t delta);   // defined below
+
 // Records a response time into the ring buffer that drives mood.
 inline void statsRecordVelocity(uint32_t seconds) {
   _stats.velocity[_stats.velIdx] = (uint16_t)min(seconds, (uint32_t)65535u);
@@ -110,6 +112,8 @@ inline void statsOnBridgeTokens(uint32_t bridgeTotal) {
   _lastBridgeTokens = bridgeTotal;
   if (delta == 0) return;
 
+  statsMoodOnTokens(delta);
+
   uint8_t lvlBefore = (uint8_t)(_stats.tokens / TOKENS_PER_LEVEL);
   _stats.tokens += delta;
   uint8_t lvlAfter = (uint8_t)(_stats.tokens / TOKENS_PER_LEVEL);
@@ -154,23 +158,58 @@ inline uint16_t statsMedianVelocity() {
   return tmp[n/2];
 }
 
-// 0..4 tier. Velocity sets the base; heavy denial ratio drags it down.
+// Mood, 0..4 tiers, held as milli-tiers so it moves smoothly.
+//
+// Two earlier models both failed on this setup:
+//
+//   1. Upstream keyed mood off how fast you answered permission prompts.
+//      With auto-approval there are no manual approvals, so the sample
+//      buffer stayed empty and the no-data path returned a fixed 2/4.
+//   2. Timing how long `waiting` stayed above zero. That does not fire
+//      either: auto mode approves before a prompt is ever surfaced as
+//      waiting, so there was still never a sample - and the old
+//      approve/deny ratio penalty then dragged the neutral 2 down to 0,
+//      which is worse than where it started.
+//
+// So mood now tracks work done, which is the one signal that definitely
+// flows in every mode: tokens. Using Claude raises it, leaving the pet
+// alone lowers it. The approve/deny ratio no longer factors in at all -
+// with auto mode the counts are arbitrary, and it was what pinned mood to
+// zero.
+static const uint32_t MOOD_TOKENS_PER_TIER = 15000;
+static const uint32_t MOOD_DECAY_MS = 90UL * 60UL * 1000UL;   // a tier per 90m
+static int32_t  _moodMilli   = 2000;   // start neutral at 2/4
+static uint32_t _moodLastMs  = 0;
+
+inline void statsMoodOnTokens(uint32_t delta) {
+  _moodMilli += (int32_t)((int64_t)delta * 1000 / MOOD_TOKENS_PER_TIER);
+  if (_moodMilli > 4000) _moodMilli = 4000;
+}
+
+// Call once per loop; decays only while no work is arriving.
+inline void statsMoodDecay(bool working) {
+  uint32_t now = millis();
+  if (_moodLastMs == 0) { _moodLastMs = now; return; }
+  uint32_t dt = now - _moodLastMs;
+  if (dt < 1000) return;
+  _moodLastMs = now;
+  if (working) return;
+  _moodMilli -= (int32_t)((int64_t)dt * 1000 / MOOD_DECAY_MS);
+  if (_moodMilli < 0) _moodMilli = 0;
+}
+
+// A prompt left sitting is the one thing that should still sour the mood -
+// it is the pet waiting on you, which is the original idea.
+inline void statsMoodOnStalled(uint32_t seconds) {
+  if (seconds < 60) return;
+  _moodMilli -= 500;
+  if (_moodMilli < 0) _moodMilli = 0;
+}
+
 inline uint8_t statsMoodTier() {
-  uint16_t vel = statsMedianVelocity();
-  int8_t tier;
-  if (vel == 0) tier = 2;              // no data: neutral
-  else if (vel < 15) tier = 4;
-  else if (vel < 30) tier = 3;
-  else if (vel < 60) tier = 2;
-  else if (vel < 120) tier = 1;
-  else tier = 0;
-  uint16_t a = _stats.approvals, d = _stats.denials;
-  if (a + d >= 3) {                    // need a few decisions before judging
-    if (d > a) tier -= 2;
-    else if (d * 2 > a) tier -= 1;     // deny rate > 33%
-  }
-  if (tier < 0) tier = 0;
-  return (uint8_t)tier;
+  int32_t t = _moodMilli / 1000;
+  if (t < 0) t = 0; if (t > 4) t = 4;
+  return (uint8_t)t;
 }
 
 // Energy, 0..5.

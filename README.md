@@ -232,15 +232,25 @@ signals upstream used do not exist here.
 | --- | --- |
 | **Fed** (10 dots) | Output tokens: one dot per 5K, wrapping every 50K |
 | **Level** | 50K tokens each; crossing one fires the celebrate animation |
-| **Mood** (4 hearts) | Median of the last 8 "how long did anything sit blocked" times, minus a penalty if denials outweigh approvals |
+| **Mood** (4 hearts) | Output tokens: +1 heart per 15K, −1 per 90 min idle, −½ for a prompt left sitting over a minute |
 | **Energy** (5 bars) | Drains one bar per ~30 min with sessions running, recovers one per ~20 min idle |
 
-**Mood** upstream was fed only by manual approvals. With auto-approval on
-there is never a sample, and the no-data path returns a fixed middle value —
-so mood was not slow to move, it was inert. It now times how long
-`waiting` stays above zero and records that when it clears, whether a human
-or auto mode cleared it. Same meaning ("is anything stuck?"), works either
-way.
+**Mood** took two attempts to get right, and the first two models both read
+as broken on a machine that uses auto-approval:
+
+1. Upstream keyed it off how fast you answered permission prompts. With
+   auto-approval there are no manual approvals, the sample buffer stays
+   empty, and the no-data path returns a fixed 2/4 — inert, not slow.
+2. Timing how long `waiting` stayed above zero does not fire either: auto
+   mode approves *before* a prompt is surfaced as waiting. Still no sample,
+   and the old approve/deny ratio penalty then dragged the neutral 2 down to
+   0 — worse than where it started.
+
+It now tracks tokens, the one signal that flows in every mode (the working
+fed bar and level counter are proof of that). Using Claude raises it,
+leaving the device alone lowers it. The approve/deny ratio no longer
+factors in: with auto mode those counts are arbitrary, and that penalty is
+what pinned mood at zero.
 
 **Energy** upstream drained on a timer and only refilled when you lifted the
 stick out of a face-down nap. That gesture needs an accelerometer, so on
