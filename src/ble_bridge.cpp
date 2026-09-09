@@ -29,6 +29,9 @@ static volatile bool      connected = false;
 static volatile bool      secure = false;
 static volatile uint32_t  passkey = 0;
 static volatile uint16_t  mtu = 23;
+// Advertising restart is deferred out of the disconnect callback and then
+// re-kicked periodically - see bleTick().
+static volatile uint32_t  advertiseAt = 0;
 
 static void rxPush(const uint8_t* p, size_t n) {
   for (size_t i = 0; i < n; i++) {
@@ -48,13 +51,32 @@ class RxCallbacks : public BLECharacteristicCallbacks {
 };
 
 class ServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* s) override {
+  void onConnect(BLEServer* s) override {}
+
+  void onConnect(BLEServer* s, esp_ble_gatts_cb_param_t* param) override {
     connected = true;
-    Serial.println("[ble] connected");
+    // Relax the connection parameters.
+    //
+    // Advertising asks for a 7.5-22.5ms interval, which is what a latency
+    // sensitive peripheral wants. This is not one: it sends a few short
+    // JSON lines a second. A fast interval means many more chances to miss
+    // events, and the measured failure was reason=0x08 - supervision
+    // timeout, the link going quiet for longer than the negotiated window.
+    //
+    // 30-50ms with a 6s supervision timeout costs nothing perceptible here
+    // and gives the link far more slack before the controller gives up.
+    esp_ble_conn_update_params_t p = {};
+    memcpy(p.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+    p.min_int = 24;    // 24 * 1.25ms = 30ms
+    p.max_int = 40;    // 40 * 1.25ms = 50ms
+    p.latency = 0;
+    p.timeout = 600;   // 600 * 10ms = 6s
+    esp_ble_gap_update_conn_params(&p);
+    Serial.println("[ble] connected (conn params 30-50ms, 6s timeout)");
   }
-  void onDisconnect(BLEServer* s) override {
-    onDisconnect(s, nullptr);
-  }
+  // The library calls both overloads for one event; do the work only in the
+  // one that carries the reason code, or every drop is logged twice.
+  void onDisconnect(BLEServer* s) override {}
   // The reason code is the difference between "the host gave up on
   // encryption" and "the link just ended", which are not otherwise
   // distinguishable from the outside. 0x13/0x16 are remote/local user
@@ -73,8 +95,13 @@ class ServerCallbacks : public BLEServerCallbacks {
       Serial.printf("[ble] disconnected (no reason) secure_was=%d bonds=%d\n",
                     wasSecure ? 1 : 0, esp_ble_get_bond_device_num());
     }
-    // Restart advertising so the next client can find us.
-    BLEDevice::startAdvertising();
+    // Do NOT restart advertising here. Calling startAdvertising() from
+    // inside the disconnect callback can silently fail on ESP32 - the stack
+    // is still tearing the link down - which leaves the device believing it
+    // is discoverable when it is not. That is the "drops, then Connect does
+    // nothing until macOS forgets it" failure. bleTick() restarts it a
+    // moment later, and keeps retrying while disconnected.
+    advertiseAt = millis() + 500;
   }
   void onMtuChanged(BLEServer*, esp_ble_gatts_cb_param_t* param) override {
     mtu = param->mtu.mtu;
@@ -160,8 +187,10 @@ void bleInit(const char* deviceName) {
   BLEAdvertising* adv = BLEDevice::getAdvertising();
   adv->addServiceUUID(NUS_SERVICE_UUID);
   adv->setScanResponse(true);
-  adv->setMinPreferred(0x06);   // iOS-friendly connection interval
-  adv->setMaxPreferred(0x12);
+  // Match the parameters requested in onConnect: a slow, forgiving link
+  // beats a fast one for a device sending a few short lines a second.
+  adv->setMinPreferred(0x18);   // 30ms
+  adv->setMaxPreferred(0x28);   // 50ms
   BLEDevice::startAdvertising();
   // Ground truth for what is on air, rather than what we asked for.
   Serial.printf("[ble] advertising as '%s' addr=%s\n",
@@ -171,6 +200,19 @@ void bleInit(const char* deviceName) {
 // Periodic state line, so a random disconnect can be classified after the
 // fact: a continuous uptime means the link dropped, a reset one means the
 // device rebooted, and the bond count says whether our key survived.
+// Call every loop. Owns advertising recovery: restarts it shortly after a
+// disconnect, then re-kicks every 10s for as long as we are not connected,
+// so a single failed start cannot strand the device off the air.
+void bleTick() {
+  uint32_t now = millis();
+  if (connected) { advertiseAt = 0; return; }
+  if (advertiseAt == 0) advertiseAt = now + 10000;
+  if ((int32_t)(now - advertiseAt) < 0) return;
+  advertiseAt = now + 10000;
+  BLEDevice::startAdvertising();
+  Serial.println("[ble] advertising restarted");
+}
+
 void bleLogState() {
   static uint32_t last = 0;
   uint32_t now = millis();

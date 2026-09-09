@@ -208,6 +208,31 @@ knob turns so no decision can be sent.
 one session is the common case and the animation otherwise never played.
 Single-GIF states also loop instead of freezing on their last frame.
 
+### If it drops and will not reconnect
+
+Two separate faults were behind this, both fixed, but worth knowing about
+if you change the BLE code:
+
+**Advertising must not be restarted from the disconnect callback.** Upstream
+calls `startAdvertising()` there. On ESP32 that can silently fail — the
+stack is still tearing the link down — leaving the device believing it is
+discoverable when it is not. The symptom is exactly the confusing one:
+the link drops, **Connect** does nothing, and the only way back is making
+the host forget the device. `bleTick()` now defers the restart by 500ms and
+re-kicks it every 10s while disconnected, so one failed start cannot strand
+the device off the air.
+
+**The connection interval was too aggressive.** Upstream advertises a
+7.5–22.5ms interval, which suits a latency-critical peripheral. This is not
+one: it sends a few short JSON lines a second. Measured drops were
+`reason=0x08` — supervision timeout, the link going quiet longer than the
+negotiated window. Now 30–50ms with a 6s supervision timeout, requested in
+`onConnect`, which is far more slack for no perceptible cost.
+
+The `[state]` log line (uptime, connected, secure, bond count, heap) is what
+makes any of this diagnosable: continuous uptime means a link drop rather
+than a reboot, and the bond count says whether the key survived.
+
 ### When it will not pair
 
 Symptoms, in the order they are worth checking:

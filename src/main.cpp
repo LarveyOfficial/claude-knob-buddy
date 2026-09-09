@@ -1134,6 +1134,7 @@ void loop() {
 
   // Energy integrates against whether Claude is working, which replaces the
   // face-down nap the IMU used to provide.
+  bleTick();
   bleLogState();
 
   statsEnergyUpdate(tama.sessionsRunning > 0);

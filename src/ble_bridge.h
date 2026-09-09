@@ -16,6 +16,7 @@
 
 void bleInit(const char* deviceName);
 bool bleConnected();
+void bleTick();       // advertising recovery; call every loop
 void bleLogState();   // periodic diagnostic line, throttled internally
 // True once LE Secure Connections bonding has completed for the current
 // link. The NUS characteristics are encrypted-only, so in practice this
