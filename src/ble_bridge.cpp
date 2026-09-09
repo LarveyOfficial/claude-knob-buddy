@@ -90,6 +90,9 @@ class SecCallbacks : public BLESecurityCallbacks {
   uint32_t onPassKeyRequest() override { return 0; }
   bool onConfirmPIN(uint32_t) override { return false; }
   bool onSecurityRequest() override { return true; }
+  // Not called under Just Works. Kept so switching the auth mode back to
+  // ESP_LE_AUTH_REQ_SC_MITM_BOND restores the passkey screen with no other
+  // changes; main.cpp still polls blePasskey() and renders it.
   void onPassKeyNotify(uint32_t pk) override {
     passkey = pk;
     Serial.printf("[ble] passkey %06lu\n", (unsigned long)pk);
@@ -107,7 +110,21 @@ void bleInit(const char* deviceName) {
   // Request the biggest MTU we can get. macOS negotiates to 185 typically.
   BLEDevice::setMTU(517);
 
-  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM);
+  // Just Works bonding rather than passkey-with-MITM.
+  //
+  // REFERENCE.md recommends DisplayOnly + a 6-digit passkey, and upstream
+  // does that. In practice the bond desynced repeatedly against macOS,
+  // which persists BLE bonds to disk and then refuses to re-pair a device
+  // it believes it knows - the link dies before authentication (HCI reason
+  // 0x13) and the only way back was the reset menu plus reading six digits
+  // off the screen.
+  //
+  // Just Works keeps the link AES-CCM encrypted and still bonds, so
+  // reconnects reuse the stored key; it drops only MITM protection during
+  // the pairing handshake itself. The trade is deliberate: an attacker
+  // would have to be in radio range at the exact moment of pairing,
+  // whereas a desync that needs manual recovery happened repeatedly.
+  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
   BLEDevice::setSecurityCallbacks(new SecCallbacks());
 
   server = BLEDevice::createServer();
@@ -134,8 +151,8 @@ void bleInit(const char* deviceName) {
   svc->start();
 
   BLESecurity* sec = new BLESecurity();
-  sec->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
-  sec->setCapability(ESP_IO_CAP_OUT);
+  sec->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);   // no MITM
+  sec->setCapability(ESP_IO_CAP_NONE);                   // no display = Just Works
   sec->setKeySize(16);
   sec->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
   sec->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
@@ -149,6 +166,20 @@ void bleInit(const char* deviceName) {
   // Ground truth for what is on air, rather than what we asked for.
   Serial.printf("[ble] advertising as '%s' addr=%s\n",
                 deviceName, BLEDevice::getAddress().toString().c_str());
+}
+
+// Periodic state line, so a random disconnect can be classified after the
+// fact: a continuous uptime means the link dropped, a reset one means the
+// device rebooted, and the bond count says whether our key survived.
+void bleLogState() {
+  static uint32_t last = 0;
+  uint32_t now = millis();
+  if (now - last < 30000) return;
+  last = now;
+  Serial.printf("[state] up=%lus conn=%d sec=%d bonds=%d heap=%u\n",
+                (unsigned long)(now / 1000), connected ? 1 : 0,
+                secure ? 1 : 0, esp_ble_get_bond_device_num(),
+                (unsigned)ESP.getFreeHeap());
 }
 
 bool bleConnected() { return connected; }

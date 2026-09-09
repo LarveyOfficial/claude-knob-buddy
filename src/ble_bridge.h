@@ -16,6 +16,7 @@
 
 void bleInit(const char* deviceName);
 bool bleConnected();
+void bleLogState();   // periodic diagnostic line, throttled internally
 // True once LE Secure Connections bonding has completed for the current
 // link. The NUS characteristics are encrypted-only, so in practice this
 // is always true by the time any data flows; exposed so the status ack

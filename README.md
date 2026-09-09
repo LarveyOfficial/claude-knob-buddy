@@ -124,9 +124,35 @@ here rather than as a postage stamp.
 
 Enable developer mode in Claude for macOS or Windows (**Help →
 Troubleshooting → Enable Developer Mode**), then **Developer → Open Hardware
-Buddy…**, click **Connect**, and pick `Claude-XXXX`. The device shows a
-six-digit passkey to type on the desktop; after that the link is encrypted and
-reconnects on its own.
+Buddy…**, click **Connect**, and pick `Claude-XXXX`. Pairing is silent — no
+passkey — and reconnects afterwards are automatic.
+
+### Why no passkey (a deliberate security trade)
+
+`REFERENCE.md` recommends DisplayOnly IO capability with a six-digit
+passkey, and upstream does exactly that
+(`ESP_LE_AUTH_REQ_SC_MITM_BOND` + `ESP_IO_CAP_OUT`). This fork uses Just
+Works bonding instead (`ESP_LE_AUTH_REQ_SC_BOND` + `ESP_IO_CAP_NONE`).
+
+The reason is measured, not theoretical: against macOS the bond desynced
+repeatedly. macOS persists BLE bonds to disk and then refuses to re-pair a
+device it believes it already knows — the link dies before authentication
+(HCI reason `0x13`, with `bonds=0` on the device side, so the mismatch was
+entirely host-side). Recovery each time meant the reset menu plus reading
+six digits off a 1.8" screen.
+
+**What is kept:** the link is still AES-CCM encrypted and still bonds, so
+reconnects reuse the stored key. Verified on the device: `sec=1 bonds=1`
+in the `[state]` log line.
+
+**What is given up:** MITM protection during the pairing handshake itself.
+An attacker would need to be in radio range at the exact moment you pair.
+After pairing, traffic is encrypted either way.
+
+To restore upstream's behaviour, set the auth mode back to
+`ESP_LE_AUTH_REQ_SC_MITM_BOND` and the capability to `ESP_IO_CAP_OUT` in
+`src/ble_bridge.cpp`. The passkey screen and `onPassKeyNotify` handler are
+left intact for exactly that, so no other change is needed.
 
 ## Controls
 

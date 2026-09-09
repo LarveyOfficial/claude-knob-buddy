@@ -1134,6 +1134,8 @@ void loop() {
 
   // Energy integrates against whether Claude is working, which replaces the
   // face-down nap the IMU used to provide.
+  bleLogState();
+
   statsEnergyUpdate(tama.sessionsRunning > 0);
 
   // Mood rises from token throughput (see statsMoodOnTokens, fed from the
